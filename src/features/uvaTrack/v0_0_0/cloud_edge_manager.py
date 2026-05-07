@@ -20,6 +20,11 @@ from models import (
     TaskRecord,
     TaskStatus,
     ChannelType,
+    NavigationInstruction,
+    NavigationStatus,
+    TrajectoryData,
+    Waypoint,
+    DroneStatus,
 )
 from stream_registry import StreamRegistry
 from heartbeat import HeartbeatMonitor
@@ -59,6 +64,10 @@ class CloudEdgeManager:
         self._devices: Dict[str, EdgeDevice] = {}
         self._tasks: Dict[str, TaskRecord] = {}       # task_id -> TaskRecord
         self._device_tasks: Dict[str, str] = {}        # device_id -> task_id
+
+        self._nav_instructions: Dict[str, NavigationInstruction] = {}  # instruction_id -> NavigationInstruction
+        self._trajectories: Dict[str, TrajectoryData] = {}              # trajectory_id -> TrajectoryData
+        self._drone_statuses: Dict[str, DroneStatus] = {}               # device_id -> latest DroneStatus
 
         self._stream_registry = StreamRegistry()
         self._heartbeat = HeartbeatMonitor(
@@ -529,6 +538,172 @@ class CloudEdgeManager:
 
     def get_stream_channels(self, device_id: str) -> List[Dict[str, Any]]:
         return self._stream_registry.get_channels_by_device(device_id)
+
+    # ==================================================================
+    #  导航指令调度（边缘服务 → 类脑盒子）
+    # ==================================================================
+
+    def dispatch_navigation(
+        self,
+        device_id: str,
+        server_id: str,
+        start_point: Dict[str, float],
+        end_point: Dict[str, float],
+        algorithm: str = "default",
+        nav_params: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        with self._lock:
+            device = self._devices.get(device_id)
+            if not device:
+                return {"code": -1, "msg": f"设备 {device_id} 不存在", "data": {}}
+            server = self._servers.get(server_id)
+            if not server:
+                return {"code": -1, "msg": f"服务器 {server_id} 不存在", "data": {}}
+            if server.status != ServerStatus.ACTIVE:
+                return {
+                    "code": -2,
+                    "msg": f"服务器 {server_id} 不可用 (status={server.status.value})",
+                    "data": {},
+                }
+
+            task_id = device.active_task_id or ""
+            instruction = NavigationInstruction(
+                instruction_id=NavigationInstruction.generate_instruction_id(),
+                task_id=task_id,
+                device_id=device_id,
+                server_id=server_id,
+                start_point=dict(start_point),
+                end_point=dict(end_point),
+                algorithm=algorithm,
+                nav_params=dict(nav_params) if nav_params else {},
+                status=NavigationStatus.DISPATCHED,
+                dispatched_at=time.time(),
+            )
+            self._nav_instructions[instruction.instruction_id] = instruction
+            logger.info(
+                "Navigation dispatched: %s device=%s -> server=%s",
+                instruction.instruction_id,
+                device_id,
+                server_id,
+            )
+            return {
+                "code": 0,
+                "msg": "success",
+                "data": instruction.to_dict(),
+            }
+
+    def receive_trajectory(
+        self,
+        instruction_id: str,
+        device_id: str,
+        server_id: str,
+        waypoints: List[Dict[str, Any]],
+        total_distance_m: float = 0.0,
+        estimated_time_s: float = 0.0,
+        algorithm_used: str = "",
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        with self._lock:
+            instruction = self._nav_instructions.get(instruction_id)
+            if instruction:
+                instruction.status = NavigationStatus.TRAJECTORY_RECEIVED
+
+            wp_objects = []
+            for i, wp in enumerate(waypoints):
+                wp_objects.append(Waypoint(
+                    lat=float(wp.get("lat", 0)),
+                    lng=float(wp.get("lng", 0)),
+                    alt=float(wp.get("alt", 0)),
+                    seq=wp.get("seq", i),
+                    hold_time_s=float(wp.get("hold_time_s", 0)),
+                    speed_m_s=float(wp.get("speed_m_s", 0)),
+                    metadata=wp.get("metadata", {}),
+                ))
+
+            trajectory = TrajectoryData(
+                trajectory_id=TrajectoryData.generate_trajectory_id(),
+                instruction_id=instruction_id,
+                device_id=device_id,
+                server_id=server_id,
+                waypoints=wp_objects,
+                total_distance_m=float(total_distance_m),
+                estimated_time_s=float(estimated_time_s),
+                algorithm_used=algorithm_used,
+                metadata=dict(metadata) if metadata else {},
+            )
+            self._trajectories[trajectory.trajectory_id] = trajectory
+            logger.info(
+                "Trajectory received: %s for instruction=%s (%d waypoints)",
+                trajectory.trajectory_id,
+                instruction_id,
+                len(wp_objects),
+            )
+            return {
+                "code": 0,
+                "msg": "success",
+                "data": trajectory.to_dict(),
+            }
+
+    def receive_drone_status(
+        self,
+        device_id: str,
+        position: Optional[Dict[str, float]] = None,
+        velocity: Optional[Dict[str, float]] = None,
+        attitude: Optional[Dict[str, float]] = None,
+        battery_pct: float = 0.0,
+        flight_mode: str = "unknown",
+        armed: bool = False,
+        gps_fix_type: int = 0,
+        satellites_visible: int = 0,
+        raw_mavlink: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        with self._lock:
+            device = self._devices.get(device_id)
+            if not device:
+                return {"code": -1, "msg": f"设备 {device_id} 不存在", "data": {}}
+
+            status = DroneStatus(
+                device_id=device_id,
+                position=dict(position) if position else {},
+                velocity=dict(velocity) if velocity else {},
+                attitude=dict(attitude) if attitude else {},
+                battery_pct=float(battery_pct),
+                flight_mode=flight_mode,
+                armed=bool(armed),
+                gps_fix_type=int(gps_fix_type),
+                satellites_visible=int(satellites_visible),
+                raw_mavlink=dict(raw_mavlink) if raw_mavlink else {},
+            )
+            self._drone_statuses[device_id] = status
+
+            if position:
+                device.location = dict(position)
+            device.last_active_time = time.time()
+
+            return {
+                "code": 0,
+                "msg": "success",
+                "data": status.to_dict(),
+            }
+
+    def get_navigation_status(self, instruction_id: str) -> Optional[Dict[str, Any]]:
+        with self._lock:
+            instruction = self._nav_instructions.get(instruction_id)
+            if not instruction:
+                return None
+            result = instruction.to_dict()
+            related_trajectories = [
+                t.to_dict()
+                for t in self._trajectories.values()
+                if t.instruction_id == instruction_id
+            ]
+            result["trajectories"] = related_trajectories
+            return result
+
+    def get_drone_status(self, device_id: str) -> Optional[Dict[str, Any]]:
+        with self._lock:
+            status = self._drone_statuses.get(device_id)
+            return status.to_dict() if status else None
 
     def shutdown(self) -> None:
         self._heartbeat.stop()

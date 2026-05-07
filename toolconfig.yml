@@ -113,6 +113,60 @@ tools_sync_cfgs: {
                                     "device_id": "设备的唯一标识符",
                                     "location": "位置信息字典，如 {'lat': 30.27, 'lng': 120.15, 'alt': 5.0}"
                                 }
+                            },
+                            {
+                                "func_name": "dispatch_navigation",
+                                "func_desc": "向类脑盒子下发导航指令（起点/终点/算法/参数）",
+                                "params": {
+                                    "device_id": "发起请求的边缘设备ID",
+                                    "server_id": "分配的计算服务器（类脑盒子）ID",
+                                    "start_point": "起点坐标字典，如 {'lat': 30.27, 'lng': 120.15, 'alt': 10.0}",
+                                    "end_point": "终点坐标字典，如 {'lat': 30.28, 'lng': 120.16, 'alt': 10.0}",
+                                    "algorithm": "导航算法名称，如 'a_star_optimized'",
+                                    "nav_params": "可选的导航参数字典，如 {'obstacle_avoidance': true, 'max_speed_m_s': 5.0}"
+                                }
+                            },
+                            {
+                                "func_name": "receive_trajectory",
+                                "func_desc": "接收类脑盒子上报的导航轨迹数据",
+                                "params": {
+                                    "instruction_id": "对应的导航指令ID",
+                                    "device_id": "设备ID",
+                                    "server_id": "服务器ID",
+                                    "waypoints": "航点列表，如 [{'lat': 30.27, 'lng': 120.15, 'alt': 10.0, 'seq': 0, 'speed_m_s': 3.0}]",
+                                    "total_distance_m": "轨迹总距离（米），浮点数",
+                                    "estimated_time_s": "预计飞行时间（秒），浮点数",
+                                    "algorithm_used": "实际使用的导航算法名称"
+                                }
+                            },
+                            {
+                                "func_name": "receive_drone_status",
+                                "func_desc": "接收类脑盒子转发的无人机位置和飞行状态",
+                                "params": {
+                                    "device_id": "设备ID",
+                                    "position": "位置字典 {'lat', 'lng', 'alt'}",
+                                    "velocity": "速度字典 {'vx', 'vy', 'vz'}（m/s）",
+                                    "attitude": "姿态字典 {'roll', 'pitch', 'yaw'}（rad）",
+                                    "battery_pct": "电池电量百分比，浮点数",
+                                    "flight_mode": "飞行模式字符串，如 'GUIDED', 'AUTO', 'LOITER'",
+                                    "armed": "是否解锁，布尔值",
+                                    "gps_fix_type": "GPS定位类型，整数值",
+                                    "satellites_visible": "可见卫星数，整数值"
+                                }
+                            },
+                            {
+                                "func_name": "get_navigation_status",
+                                "func_desc": "查询导航指令的执行状态及关联轨迹",
+                                "params": {
+                                    "instruction_id": "导航指令唯一标识符"
+                                }
+                            },
+                            {
+                                "func_name": "get_drone_status",
+                                "func_desc": "查询设备最新的无人机飞行状态",
+                                "params": {
+                                    "device_id": "设备的唯一标识符"
+                                }
                             }
                         ]
                     }
