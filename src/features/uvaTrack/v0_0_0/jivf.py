@@ -9,21 +9,18 @@ CloudEdgeManager 工具入口 — CTest 类
   add_device          注册边缘设备（如机器狗、无人车）到管控系统
   remove_device       从系统中注销边缘设备
   list_devices        获取已注册的边缘设备列表及在线状态
-  assign_and_start_task  核心调度：指定边缘设备连接特定服务器，下发路径规划及计算任务
+  assign_and_start_task  核心调度：指定边缘设备连接特定服务器执行计算任务
   stop_task           中断指定设备与服务器之间的任务和数据流
 
 扩展接口:
   heartbeat           设备/服务器心跳上报
-  get_device_info     获取设备详细信息（含流通道）
-  get_task_info       查询任务详情
+  get_device_info     获取设备详细信息（含流通道、遥测）
+  get_task_info       查询任务详情（含计算结果）
   update_location     设备位置上报
 
-导航调度接口（边缘服务 ↔ 类脑盒子）:
-  dispatch_navigation    向类脑盒子下发导航指令
-  receive_trajectory     接收类脑盒子上报的导航轨迹
-  receive_drone_status   接收类脑盒子转发的无人机位置/状态
-  get_navigation_status  查询导航指令状态及关联轨迹
-  get_drone_status       查询设备最新的无人机状态
+通用数据交互接口:
+  submit_task_result       服务器提交任务计算结果（类型+载荷由调用方定义）
+  update_device_telemetry  设备/服务器上报遥测数据（类型+数据由调用方定义）
 
 --- params JSON 格式示例 ---
 
@@ -75,7 +72,10 @@ assign_and_start_task:
         "stream_port": 8554,
         "custom_payloads": {
             "map_resolution": 0.05,
-            "enable_local_slm": true
+            "enable_local_slm": true,
+            "start_point": {"lat": 30.27, "lng": 120.15, "alt": 10.0},
+            "end_point": {"lat": 30.28, "lng": 120.16, "alt": 10.0},
+            "nav_params": {"obstacle_avoidance": true, "max_speed_m_s": 5.0}
         }
     }
 }
@@ -109,52 +109,38 @@ update_location:
     "location": {"lat": 30.27, "lng": 120.15, "alt": 5.0}
 }
 
-dispatch_navigation:
+submit_task_result:
+{
+    "task_id": "task_a1b2c3d4e5f6",
+    "result_type": "trajectory",
+    "payload": {
+        "waypoints": [
+            {"lat": 30.270, "lng": 120.150, "alt": 10.0, "seq": 0, "speed_m_s": 3.0},
+            {"lat": 30.275, "lng": 120.155, "alt": 10.0, "seq": 1, "speed_m_s": 5.0},
+            {"lat": 30.280, "lng": 120.160, "alt": 10.0, "seq": 2, "speed_m_s": 3.0}
+        ],
+        "total_distance_m": 1200.5,
+        "estimated_time_s": 240.0,
+        "algorithm_used": "a_star_optimized"
+    },
+    "metadata": {"source": "brain_box_01"}
+}
+
+update_device_telemetry:
 {
     "device_id": "robot_dog_nx_01",
-    "server_id": "svr_node_01",
-    "start_point": {"lat": 30.27, "lng": 120.15, "alt": 10.0},
-    "end_point": {"lat": 30.28, "lng": 120.16, "alt": 10.0},
-    "algorithm": "a_star_optimized",
-    "nav_params": {"obstacle_avoidance": true, "max_speed_m_s": 5.0}
-}
-
-receive_trajectory:
-{
-    "instruction_id": "nav_a1b2c3d4e5f6",
-    "device_id": "robot_dog_nx_01",
-    "server_id": "svr_node_01",
-    "waypoints": [
-        {"lat": 30.270, "lng": 120.150, "alt": 10.0, "seq": 0, "speed_m_s": 3.0},
-        {"lat": 30.275, "lng": 120.155, "alt": 10.0, "seq": 1, "speed_m_s": 5.0},
-        {"lat": 30.280, "lng": 120.160, "alt": 10.0, "seq": 2, "speed_m_s": 3.0}
-    ],
-    "total_distance_m": 1200.5,
-    "estimated_time_s": 240.0,
-    "algorithm_used": "a_star_optimized"
-}
-
-receive_drone_status:
-{
-    "device_id": "robot_dog_nx_01",
-    "position": {"lat": 30.271, "lng": 120.151, "alt": 10.2},
-    "velocity": {"vx": 1.2, "vy": 0.5, "vz": 0.0},
-    "attitude": {"roll": 0.01, "pitch": -0.02, "yaw": 1.57},
-    "battery_pct": 85.0,
-    "flight_mode": "GUIDED",
-    "armed": true,
-    "gps_fix_type": 3,
-    "satellites_visible": 12
-}
-
-get_navigation_status:
-{
-    "instruction_id": "nav_a1b2c3d4e5f6"
-}
-
-get_drone_status:
-{
-    "device_id": "robot_dog_nx_01"
+    "telemetry_type": "drone_status",
+    "data": {
+        "position": {"lat": 30.271, "lng": 120.151, "alt": 10.2},
+        "velocity": {"vx": 1.2, "vy": 0.5, "vz": 0.0},
+        "attitude": {"roll": 0.01, "pitch": -0.02, "yaw": 1.57},
+        "battery_pct": 85.0,
+        "flight_mode": "GUIDED",
+        "armed": true,
+        "gps_fix_type": 3,
+        "satellites_visible": 12
+    },
+    "metadata": {"source": "mavlink"}
 }
 """
 import os
@@ -261,7 +247,7 @@ class CTest:
     # ==================================================================
 
     def add_device(self, params):
-        """注册边缘设备（如机器狗、无人车）到管控系统"""
+        """注册边缘设备到管控系统"""
         self.progress_callback(10, f"正在注册设备: {params.get('device_id')}")
         result = self._manager.add_device(
             device_id=params["device_id"],
@@ -294,7 +280,7 @@ class CTest:
     # ==================================================================
 
     def assign_and_start_task(self, params):
-        """核心调度：指定边缘设备连接特定服务器，下发路径规划及计算任务"""
+        """核心调度：指定边缘设备连接特定服务器执行计算任务"""
         device_id = params["device_id"]
         server_id = params["server_id"]
         self.progress_callback(
@@ -346,7 +332,7 @@ class CTest:
         return self._handle_result("heartbeat", result)
 
     def get_device_info(self, params):
-        """获取设备详细信息（含流通道和当前任务）"""
+        """获取设备详细信息（含流通道、当前任务和最新遥测）"""
         device_id = params["device_id"]
         self.progress_callback(10, f"查询设备详情: {device_id}")
         info = self._manager.get_device_info(device_id)
@@ -357,7 +343,7 @@ class CTest:
         return self._handle_result("get_device_info", result)
 
     def get_task_info(self, params):
-        """查询任务详情"""
+        """查询任务详情（含计算结果列表）"""
         task_id = params["task_id"]
         self.progress_callback(10, f"查询任务详情: {task_id}")
         info = self._manager.get_task_info(task_id)
@@ -381,78 +367,33 @@ class CTest:
         return self._handle_result("update_location", result)
 
     # ==================================================================
-    #  导航调度接口（边缘服务 ↔ 类脑盒子）
+    #  通用数据交互接口
     # ==================================================================
 
-    def dispatch_navigation(self, params):
-        """向类脑盒子下发导航指令"""
-        device_id = params["device_id"]
-        server_id = params["server_id"]
-        self.progress_callback(
-            10, f"下发导航指令: 设备 {device_id} -> 服务器 {server_id}"
-        )
-        result = self._manager.dispatch_navigation(
-            device_id=device_id,
-            server_id=server_id,
-            start_point=params["start_point"],
-            end_point=params["end_point"],
-            algorithm=params.get("algorithm", "default"),
-            nav_params=params.get("nav_params", {}),
-        )
-        return self._handle_result("dispatch_navigation", result)
-
-    def receive_trajectory(self, params):
-        """接收类脑盒子上报的导航轨迹"""
-        instruction_id = params["instruction_id"]
-        self.progress_callback(10, f"接收轨迹: instruction={instruction_id}")
-        result = self._manager.receive_trajectory(
-            instruction_id=instruction_id,
-            device_id=params["device_id"],
-            server_id=params["server_id"],
-            waypoints=params.get("waypoints", []),
-            total_distance_m=params.get("total_distance_m", 0),
-            estimated_time_s=params.get("estimated_time_s", 0),
-            algorithm_used=params.get("algorithm_used", ""),
+    def submit_task_result(self, params):
+        """服务器提交任务计算结果（通用，result_type 标识结果类型）"""
+        task_id = params["task_id"]
+        result_type = params.get("result_type", "")
+        self.progress_callback(10, f"提交任务结果: task={task_id} type={result_type}")
+        result = self._manager.submit_task_result(
+            task_id=task_id,
+            result_type=result_type,
+            payload=params.get("payload", {}),
             metadata=params.get("metadata", {}),
         )
-        return self._handle_result("receive_trajectory", result)
+        return self._handle_result("submit_task_result", result)
 
-    def receive_drone_status(self, params):
-        """接收类脑盒子转发的无人机位置/状态"""
+    def update_device_telemetry(self, params):
+        """设备/服务器上报遥测数据（通用，telemetry_type 标识遥测类型）"""
         device_id = params["device_id"]
-        self.progress_callback(10, f"接收无人机状态: {device_id}")
-        result = self._manager.receive_drone_status(
-            device_id=device_id,
-            position=params.get("position"),
-            velocity=params.get("velocity"),
-            attitude=params.get("attitude"),
-            battery_pct=params.get("battery_pct", 0),
-            flight_mode=params.get("flight_mode", "unknown"),
-            armed=params.get("armed", False),
-            gps_fix_type=params.get("gps_fix_type", 0),
-            satellites_visible=params.get("satellites_visible", 0),
-            raw_mavlink=params.get("raw_mavlink", {}),
+        telemetry_type = params.get("telemetry_type", "")
+        self.progress_callback(
+            10, f"遥测上报: device={device_id} type={telemetry_type}"
         )
-        return self._handle_result("receive_drone_status", result)
-
-    def get_navigation_status(self, params):
-        """查询导航指令状态及关联轨迹"""
-        instruction_id = params["instruction_id"]
-        self.progress_callback(10, f"查询导航状态: {instruction_id}")
-        info = self._manager.get_navigation_status(instruction_id)
-        if info is None:
-            result = {"code": -1, "msg": f"导航指令 {instruction_id} 不存在", "data": {}}
-        else:
-            result = {"code": 0, "msg": "success", "data": info}
-        return self._handle_result("get_navigation_status", result)
-
-    def get_drone_status(self, params):
-        """查询设备最新的无人机状态"""
-        device_id = params["device_id"]
-        self.progress_callback(10, f"查询无人机状态: {device_id}")
-        info = self._manager.get_drone_status(device_id)
-        if info is None:
-            result = {"code": -1, "msg": f"设备 {device_id} 无状态数据", "data": {}}
-        else:
-            result = {"code": 0, "msg": "success", "data": info}
-        return self._handle_result("get_drone_status", result)
+        result = self._manager.update_device_telemetry(
+            device_id=device_id,
+            telemetry_type=telemetry_type,
+            data=params.get("data", {}),
+            metadata=params.get("metadata", {}),
+        )
+        return self._handle_result("update_device_telemetry", result)

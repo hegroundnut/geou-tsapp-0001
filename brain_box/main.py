@@ -2,15 +2,17 @@
 类脑盒子主程序入口
 编排 MAVLink 适配器、边缘服务客户端、导航器之间的协作。
 
-数据流：
-  边缘控制服务 --[导航指令]--> 类脑盒子 --[轨迹]--> 无人机(MAVLink)
-  无人机(MAVLink) --[位置/状态]--> 类脑盒子 --[转发]--> 边缘控制服务
+数据流（通过通用接口，与边缘控制服务低耦合）：
+  边缘控制服务 --[assign_and_start_task]--> 类脑盒子获取 task_id
+  类脑盒子 --[submit_task_result(trajectory)]--> 边缘控制服务
+  类脑盒子 --[update_device_telemetry(drone_status)]--> 边缘控制服务
+  类脑盒子 --[MAVLink]--> 无人机
 """
 import time
 import signal
 import logging
 import threading
-from typing import Optional
+from typing import Optional, Dict, Any
 
 from config import BrainBoxConfig
 from models import (
@@ -32,7 +34,7 @@ class BrainBox:
 
     生命周期：
       1. start() — 连接 MAVLink + 边缘服务，启动心跳和遥测转发
-      2. handle_navigation(instruction) — 生成轨迹 → 上报边缘 → 下发无人机
+      2. handle_navigation(task_id, nav_config) — 生成轨迹 → 上报边缘 → 下发无人机
       3. stop() — 优雅关闭所有连接和线程
     """
 
@@ -51,13 +53,11 @@ class BrainBox:
 
         self._edge_client = EdgeServiceClient(
             config=self._config.edge_service,
-            on_navigation_received=self._on_navigation_received,
             simulated=True,  # 默认模拟模式
         )
 
         self._status_forward_thread: Optional[threading.Thread] = None
         self._stop_event = threading.Event()
-        self._current_instruction: Optional[NavigationInstruction] = None
 
     @property
     def state(self) -> BrainBoxState:
@@ -107,20 +107,43 @@ class BrainBox:
     #  导航处理（核心流程）
     # ------------------------------------------------------------------
 
-    def handle_navigation(self, instruction: NavigationInstruction) -> bool:
+    def handle_navigation(
+        self,
+        task_id: str,
+        nav_config: Dict[str, Any],
+    ) -> bool:
         """
-        处理一条导航指令:
-          1. 调用导航器生成轨迹
-          2. 将轨迹上报给边缘控制服务
-          3. 将轨迹航点下发给无人机
+        处理一条导航任务:
+          1. 从 nav_config 构造 NavigationInstruction
+          2. 调用导航器生成轨迹
+          3. 通过通用接口 submit_task_result 上报轨迹
+          4. 将轨迹航点下发给无人机
+
+        nav_config 格式示例：
+        {
+            "start_point": {"lat": 30.27, "lng": 120.15, "alt": 10.0},
+            "end_point": {"lat": 30.28, "lng": 120.16, "alt": 10.0},
+            "algorithm": "linear_interpolation",
+            "nav_params": {"speed_m_s": 5.0}
+        }
         """
         with self._lock:
             self._state = BrainBoxState.NAVIGATING
-            self._current_instruction = instruction
+
+        instruction = NavigationInstruction(
+            instruction_id=f"nav_{task_id}",
+            task_id=task_id,
+            device_id=self._config.edge_service.device_id,
+            server_id=self._config.edge_service.server_id,
+            start_point=nav_config.get("start_point", {}),
+            end_point=nav_config.get("end_point", {}),
+            algorithm=nav_config.get("algorithm", "default"),
+            nav_params=nav_config.get("nav_params", {}),
+        )
 
         logger.info(
-            "Processing navigation: %s (%s -> %s)",
-            instruction.instruction_id,
+            "Processing navigation: task=%s (%s -> %s)",
+            task_id,
             instruction.start_point,
             instruction.end_point,
         )
@@ -134,15 +157,15 @@ class BrainBox:
             trajectory.estimated_time_s,
         )
 
-        # 步骤 2: 上报轨迹给边缘控制服务
+        # 步骤 2: 通过通用接口上报轨迹给边缘控制服务
         self._edge_client.report_trajectory(
-            instruction_id=instruction.instruction_id,
+            task_id=task_id,
             waypoints=trajectory.waypoints,
             total_distance_m=trajectory.total_distance_m,
             estimated_time_s=trajectory.estimated_time_s,
             algorithm_used=trajectory.algorithm_used,
         )
-        logger.info("Trajectory reported to edge service")
+        logger.info("Trajectory reported to edge service via submit_task_result")
 
         # 步骤 3: 下发航点到无人机
         if not self._mavlink.upload_mission(trajectory.waypoints):
@@ -160,10 +183,6 @@ class BrainBox:
     # ------------------------------------------------------------------
     #  回调
     # ------------------------------------------------------------------
-
-    def _on_navigation_received(self, instruction: NavigationInstruction) -> None:
-        logger.info("Navigation instruction received: %s", instruction.instruction_id)
-        self.handle_navigation(instruction)
 
     def _on_drone_state_update(self, drone_state: DroneState) -> None:
         pass  # 由转发线程统一处理，避免频率过高
@@ -214,18 +233,16 @@ def main():
 
     logger.info("BrainBox is running. Press Ctrl+C to stop.")
 
-    # 模拟模式演示：注入一条导航指令
-    demo_instruction = NavigationInstruction(
-        instruction_id="nav_demo_001",
+    # 模拟模式演示：处理一条导航任务
+    brain_box.handle_navigation(
         task_id="task_demo_001",
-        device_id=config.edge_service.device_id,
-        server_id=config.edge_service.server_id,
-        start_point={"lat": 30.270, "lng": 120.150, "alt": 10.0},
-        end_point={"lat": 30.280, "lng": 120.160, "alt": 10.0},
-        algorithm="linear_interpolation",
-        nav_params={"speed_m_s": 5.0, "waypoint_interval_m": 100.0},
+        nav_config={
+            "start_point": {"lat": 30.270, "lng": 120.150, "alt": 10.0},
+            "end_point": {"lat": 30.280, "lng": 120.160, "alt": 10.0},
+            "algorithm": "linear_interpolation",
+            "nav_params": {"speed_m_s": 5.0, "waypoint_interval_m": 100.0},
+        },
     )
-    brain_box.handle_navigation(demo_instruction)
 
     # 保持运行
     try:

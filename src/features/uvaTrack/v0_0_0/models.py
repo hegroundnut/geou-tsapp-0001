@@ -180,131 +180,64 @@ class StreamChannel:
 
 
 # ---------------------------------------------------------------------------
-#  导航指令
+#  任务结果（通用 — 服务器向边缘服务提交的计算结果）
 # ---------------------------------------------------------------------------
 
-class NavigationStatus(str, Enum):
-    PENDING = "pending"
-    DISPATCHED = "dispatched"
-    TRAJECTORY_RECEIVED = "trajectory_received"
-    EXECUTING = "executing"
-    COMPLETED = "completed"
-    FAILED = "failed"
-
-
 @dataclass
-class Waypoint:
-    lat: float
-    lng: float
-    alt: float
-    seq: int = 0
-    hold_time_s: float = 0.0
-    speed_m_s: float = 0.0
-    metadata: Dict[str, Any] = field(default_factory=dict)
-
-    def to_dict(self) -> Dict[str, Any]:
-        return {
-            "lat": self.lat,
-            "lng": self.lng,
-            "alt": self.alt,
-            "seq": self.seq,
-            "hold_time_s": self.hold_time_s,
-            "speed_m_s": self.speed_m_s,
-            "metadata": dict(self.metadata),
-        }
-
-
-@dataclass
-class NavigationInstruction:
-    instruction_id: str
+class TaskResult:
+    """
+    通用任务结果。
+    服务器完成计算后提交，result_type 标识结果类型（如 trajectory、analysis 等），
+    payload 为具体数据（格式由调用方自定义，边缘服务不解析内部结构）。
+    """
+    result_id: str
     task_id: str
     device_id: str
     server_id: str
-    start_point: Dict[str, float]         # {"lat": ..., "lng": ..., "alt": ...}
-    end_point: Dict[str, float]
-    algorithm: str = "default"
-    nav_params: Dict[str, Any] = field(default_factory=dict)
-    status: NavigationStatus = NavigationStatus.PENDING
-    created_at: float = field(default_factory=time.time)
-    dispatched_at: Optional[float] = None
-
-    def to_dict(self) -> Dict[str, Any]:
-        return {
-            "instruction_id": self.instruction_id,
-            "task_id": self.task_id,
-            "device_id": self.device_id,
-            "server_id": self.server_id,
-            "start_point": dict(self.start_point),
-            "end_point": dict(self.end_point),
-            "algorithm": self.algorithm,
-            "nav_params": dict(self.nav_params),
-            "status": self.status.value,
-            "created_at": self.created_at,
-            "dispatched_at": self.dispatched_at,
-        }
-
-    @staticmethod
-    def generate_instruction_id() -> str:
-        return f"nav_{uuid.uuid4().hex[:12]}"
-
-
-@dataclass
-class TrajectoryData:
-    trajectory_id: str
-    instruction_id: str
-    device_id: str
-    server_id: str
-    waypoints: List[Waypoint] = field(default_factory=list)
-    total_distance_m: float = 0.0
-    estimated_time_s: float = 0.0
-    algorithm_used: str = ""
+    result_type: str = ""           # e.g. "trajectory", "detection", "analysis"
+    payload: Dict[str, Any] = field(default_factory=dict)
     created_at: float = field(default_factory=time.time)
     metadata: Dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> Dict[str, Any]:
         return {
-            "trajectory_id": self.trajectory_id,
-            "instruction_id": self.instruction_id,
+            "result_id": self.result_id,
+            "task_id": self.task_id,
             "device_id": self.device_id,
             "server_id": self.server_id,
-            "waypoints": [wp.to_dict() for wp in self.waypoints],
-            "total_distance_m": self.total_distance_m,
-            "estimated_time_s": self.estimated_time_s,
-            "algorithm_used": self.algorithm_used,
+            "result_type": self.result_type,
+            "payload": dict(self.payload),
             "created_at": self.created_at,
             "metadata": dict(self.metadata),
         }
 
     @staticmethod
-    def generate_trajectory_id() -> str:
-        return f"traj_{uuid.uuid4().hex[:12]}"
+    def generate_result_id() -> str:
+        return f"res_{uuid.uuid4().hex[:12]}"
 
+
+# ---------------------------------------------------------------------------
+#  设备遥测（通用 — 设备/服务器向边缘服务上报的遥测数据）
+# ---------------------------------------------------------------------------
 
 @dataclass
-class DroneStatus:
+class DeviceTelemetry:
+    """
+    通用设备遥测。
+    telemetry_type 标识遥测类型（如 position、drone_status、sensor 等），
+    data 为具体遥测数据（格式由上报方自定义，边缘服务只存储和转发）。
+    """
     device_id: str
-    position: Dict[str, float] = field(default_factory=dict)  # lat, lng, alt
-    velocity: Dict[str, float] = field(default_factory=dict)  # vx, vy, vz
-    attitude: Dict[str, float] = field(default_factory=dict)  # roll, pitch, yaw
-    battery_pct: float = 0.0
-    flight_mode: str = "unknown"
-    armed: bool = False
-    gps_fix_type: int = 0
-    satellites_visible: int = 0
+    telemetry_type: str = ""        # e.g. "position", "drone_status", "sensor", "lidar"
+    data: Dict[str, Any] = field(default_factory=dict)
     timestamp: float = field(default_factory=time.time)
-    raw_mavlink: Dict[str, Any] = field(default_factory=dict)
+    metadata: Dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> Dict[str, Any]:
         return {
             "device_id": self.device_id,
-            "position": dict(self.position),
-            "velocity": dict(self.velocity),
-            "attitude": dict(self.attitude),
-            "battery_pct": self.battery_pct,
-            "flight_mode": self.flight_mode,
-            "armed": self.armed,
-            "gps_fix_type": self.gps_fix_type,
-            "satellites_visible": self.satellites_visible,
+            "telemetry_type": self.telemetry_type,
+            "data": dict(self.data),
             "timestamp": self.timestamp,
-            "raw_mavlink": dict(self.raw_mavlink),
+            "metadata": dict(self.metadata),
         }

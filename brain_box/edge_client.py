@@ -2,11 +2,12 @@
 边缘服务客户端 — 与边缘控制服务通信
 负责：
   1. 心跳上报（保持在线状态）
-  2. 接收导航指令（轮询或 WebSocket 推送）
-  3. 上报导航轨迹
-  4. 转发无人机位置/状态
+  2. 提交计算结果（submit_task_result — 通用接口）
+  3. 上报设备遥测（update_device_telemetry — 通用接口）
 
 设计原则：
+  - 对边缘控制服务的通信全部使用通用接口（submit_task_result / update_device_telemetry）
+  - 不依赖任何设备专属接口，可随时切换服务端实现
   - HTTP 客户端用于 REST 接口调用
   - 心跳在独立线程中定时发送
   - 所有网络请求带超时和重试
@@ -18,7 +19,7 @@ import logging
 from typing import Dict, List, Optional, Any, Callable
 
 from config import EdgeServiceConfig
-from models import DroneState, Waypoint, NavigationInstruction, TrajectoryResult
+from models import DroneState, Waypoint, TrajectoryResult
 
 logger = logging.getLogger("edge_client")
 
@@ -33,23 +34,19 @@ except ImportError:
 class EdgeServiceClient:
     """
     边缘控制服务客户端。
-    通过 HTTP/REST 与边缘控制服务通信。
+    通过 HTTP/REST 与边缘控制服务通信，只使用通用接口。
     """
 
     def __init__(
         self,
         config: EdgeServiceConfig,
-        on_navigation_received: Optional[Callable[[NavigationInstruction], None]] = None,
         simulated: bool = False,
     ):
         self._config = config
-        self._on_navigation_received = on_navigation_received
         self._simulated = simulated or (not HAS_HTTPX)
         self._client: Any = None
         self._heartbeat_thread: Optional[threading.Thread] = None
-        self._poll_thread: Optional[threading.Thread] = None
         self._stop_event = threading.Event()
-        self._pending_instructions: List[NavigationInstruction] = []
         self._lock = threading.Lock()
 
     def connect(self) -> bool:
@@ -73,8 +70,6 @@ class EdgeServiceClient:
         self._stop_event.set()
         if self._heartbeat_thread:
             self._heartbeat_thread.join(timeout=3)
-        if self._poll_thread:
-            self._poll_thread.join(timeout=3)
         if self._client:
             self._client.close()
             self._client = None
@@ -94,57 +89,71 @@ class EdgeServiceClient:
         return self._post("heartbeat", payload)
 
     # ------------------------------------------------------------------
-    #  轨迹上报
+    #  提交任务结果（通用接口）
     # ------------------------------------------------------------------
+
+    def submit_task_result(
+        self,
+        task_id: str,
+        result_type: str,
+        payload: Optional[Dict[str, Any]] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> bool:
+        data = {
+            "task_id": task_id,
+            "result_type": result_type,
+            "payload": payload or {},
+            "metadata": metadata or {},
+        }
+        return self._post("submit_task_result", data)
 
     def report_trajectory(
         self,
-        instruction_id: str,
+        task_id: str,
         waypoints: List[Waypoint],
         total_distance_m: float = 0.0,
         estimated_time_s: float = 0.0,
         algorithm_used: str = "",
         metadata: Optional[Dict[str, Any]] = None,
     ) -> bool:
-        payload = {
-            "instruction_id": instruction_id,
-            "device_id": self._config.device_id,
-            "server_id": self._config.server_id,
-            "waypoints": [wp.to_dict() for wp in waypoints],
-            "total_distance_m": total_distance_m,
-            "estimated_time_s": estimated_time_s,
-            "algorithm_used": algorithm_used,
-            "metadata": metadata or {},
-        }
-        return self._post("receive_trajectory", payload)
+        return self.submit_task_result(
+            task_id=task_id,
+            result_type="trajectory",
+            payload={
+                "waypoints": [wp.to_dict() for wp in waypoints],
+                "total_distance_m": total_distance_m,
+                "estimated_time_s": estimated_time_s,
+                "algorithm_used": algorithm_used,
+            },
+            metadata=metadata,
+        )
 
     # ------------------------------------------------------------------
-    #  无人机状态转发
+    #  上报设备遥测（通用接口）
     # ------------------------------------------------------------------
 
-    def forward_drone_status(self, device_id: str, drone_state: DroneState) -> bool:
+    def update_device_telemetry(
+        self,
+        device_id: str,
+        telemetry_type: str,
+        data: Optional[Dict[str, Any]] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> bool:
         payload = {
             "device_id": device_id,
-            "position": drone_state.position,
-            "velocity": drone_state.velocity,
-            "attitude": drone_state.attitude,
-            "battery_pct": drone_state.battery_pct,
-            "flight_mode": drone_state.flight_mode,
-            "armed": drone_state.armed,
-            "gps_fix_type": drone_state.gps_fix_type,
-            "satellites_visible": drone_state.satellites_visible,
+            "telemetry_type": telemetry_type,
+            "data": data or {},
+            "metadata": metadata or {},
         }
-        return self._post("receive_drone_status", payload)
+        return self._post("update_device_telemetry", payload)
 
-    # ------------------------------------------------------------------
-    #  模拟注入导航指令（供测试使用）
-    # ------------------------------------------------------------------
-
-    def inject_navigation_instruction(self, instruction: NavigationInstruction) -> None:
-        with self._lock:
-            self._pending_instructions.append(instruction)
-        if self._on_navigation_received:
-            self._on_navigation_received(instruction)
+    def forward_drone_status(self, device_id: str, drone_state: DroneState) -> bool:
+        return self.update_device_telemetry(
+            device_id=device_id,
+            telemetry_type="drone_status",
+            data=drone_state.to_dict(),
+            metadata={"source": "mavlink"},
+        )
 
     # ------------------------------------------------------------------
     #  内部通信
