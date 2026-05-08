@@ -3,18 +3,20 @@
 边缘控制服务 HTTP 包装 — 端口 15000
 将 CloudEdgeManager 暴露为 HTTP API，供模拟设备通过网络回调。
 
+设备通过 /api/uvaTrack/CTest/ 前缀访问（与 CTest 类路径一致）。
+
 接口：
-  POST /api/add_server              — 注册服务器
-  POST /api/add_device              — 注册设备
-  POST /api/assign_and_start_task   — 分配任务
-  POST /api/stop_task               — 停止任务
-  POST /api/submit_task_result      — 提交计算结果（通用）
-  POST /api/update_device_telemetry — 上报遥测数据（通用）
-  POST /api/heartbeat               — 心跳
-  GET  /api/list_servers            — 服务器列表
-  GET  /api/list_devices            — 设备列表
-  GET  /api/task_info?task_id=xxx   — 任务详情
-  GET  /api/device_info?device_id=x — 设备详情
+  POST /api/uvaTrack/CTest/add_server              — 注册服务器
+  POST /api/uvaTrack/CTest/add_device              — 注册设备
+  POST /api/uvaTrack/CTest/assign_and_start_task   — 分配任务
+  POST /api/uvaTrack/CTest/stop_task               — 停止任务
+  POST /api/uvaTrack/CTest/submit_task_result      — 提交计算结果（通用）
+  POST /api/uvaTrack/CTest/update_device_telemetry — 上报遥测数据（通用）
+  POST /api/uvaTrack/CTest/heartbeat               — 心跳
+  GET  /api/uvaTrack/CTest/list_servers            — 服务器列表
+  GET  /api/uvaTrack/CTest/list_devices            — 设备列表
+  GET  /api/uvaTrack/CTest/task_info?task_id=xxx   — 任务详情
+  GET  /api/uvaTrack/CTest/device_info?device_id=x — 设备详情
 
 启动：python edge_service_server.py [--port 15000]
 """
@@ -54,15 +56,15 @@ class EdgeServiceHandler(BaseHTTPRequestHandler):
         path = parsed.path
         params = parse_qs(parsed.query)
 
-        if path == "/api/list_servers":
+        if path == "/api/uvaTrack/CTest/list_servers":
             filter_status = params.get("filter_by_status", ["all"])[0]
             self._json_response(200, _manager.list_servers(filter_status))
 
-        elif path == "/api/list_devices":
+        elif path == "/api/uvaTrack/CTest/list_devices":
             group_id = params.get("group_id", ["all"])[0]
             self._json_response(200, _manager.list_devices(group_id))
 
-        elif path == "/api/task_info":
+        elif path == "/api/uvaTrack/CTest/task_info":
             task_id = params.get("task_id", [None])[0]
             if not task_id:
                 self._json_response(400, {"code": -1, "msg": "task_id required"})
@@ -73,7 +75,7 @@ class EdgeServiceHandler(BaseHTTPRequestHandler):
             else:
                 self._json_response(200, {"code": 0, "data": info})
 
-        elif path == "/api/device_info":
+        elif path == "/api/uvaTrack/CTest/device_info":
             device_id = params.get("device_id", [None])[0]
             if not device_id:
                 self._json_response(400, {"code": -1, "msg": "device_id required"})
@@ -92,7 +94,7 @@ class EdgeServiceHandler(BaseHTTPRequestHandler):
         body = self._read_body()
         path = urlparse(self.path).path
 
-        if path == "/api/add_server":
+        if path == "/api/uvaTrack/CTest/add_server":
             result = _manager.add_server(
                 server_id=body.get("server_id", ""),
                 ip_address=body.get("ip_address", ""),
@@ -102,7 +104,7 @@ class EdgeServiceHandler(BaseHTTPRequestHandler):
             )
             self._json_response(200, result)
 
-        elif path == "/api/add_device":
+        elif path == "/api/uvaTrack/CTest/add_device":
             result = _manager.add_device(
                 device_id=body.get("device_id", ""),
                 hardware_type=body.get("hardware_type", ""),
@@ -113,7 +115,7 @@ class EdgeServiceHandler(BaseHTTPRequestHandler):
             )
             self._json_response(200, result)
 
-        elif path == "/api/assign_and_start_task":
+        elif path == "/api/uvaTrack/CTest/assign_and_start_task":
             result = _manager.assign_and_start_task(
                 device_id=body.get("device_id", ""),
                 server_id=body.get("server_id", ""),
@@ -121,14 +123,14 @@ class EdgeServiceHandler(BaseHTTPRequestHandler):
             )
             self._json_response(200, result)
 
-        elif path == "/api/stop_task":
+        elif path == "/api/uvaTrack/CTest/stop_task":
             result = _manager.stop_task(
                 device_id=body.get("device_id", ""),
                 reason=body.get("reason", "user_manual_stop"),
             )
             self._json_response(200, result)
 
-        elif path == "/api/submit_task_result":
+        elif path == "/api/uvaTrack/CTest/submit_task_result":
             result = _manager.submit_task_result(
                 task_id=body.get("task_id", ""),
                 result_type=body.get("result_type", ""),
@@ -137,7 +139,7 @@ class EdgeServiceHandler(BaseHTTPRequestHandler):
             )
             self._json_response(200, result)
 
-        elif path == "/api/update_device_telemetry":
+        elif path == "/api/uvaTrack/CTest/update_device_telemetry":
             result = _manager.update_device_telemetry(
                 device_id=body.get("device_id", ""),
                 telemetry_type=body.get("telemetry_type", ""),
@@ -146,7 +148,7 @@ class EdgeServiceHandler(BaseHTTPRequestHandler):
             )
             self._json_response(200, result)
 
-        elif path == "/api/heartbeat":
+        elif path == "/api/uvaTrack/CTest/heartbeat":
             target_type = body.get("target_type", "device")
             target_id = body.get("target_id", "")
             if target_type == "server":
@@ -155,14 +157,14 @@ class EdgeServiceHandler(BaseHTTPRequestHandler):
                 ok = _manager.refresh_device_heartbeat(target_id, body.get("location"))
             self._json_response(200, {"code": 0 if ok else -1, "msg": "ok" if ok else "not found"})
 
-        elif path == "/api/remove_server":
+        elif path == "/api/uvaTrack/CTest/remove_server":
             result = _manager.remove_server(
                 server_id=body.get("server_id", ""),
                 force_stop=body.get("force_stop", False),
             )
             self._json_response(200, result)
 
-        elif path == "/api/remove_device":
+        elif path == "/api/uvaTrack/CTest/remove_device":
             result = _manager.remove_device(device_id=body.get("device_id", ""))
             self._json_response(200, result)
 
@@ -213,17 +215,17 @@ def start_edge_service(port: int = 15000, blocking: bool = True):
     print(f"    模式:         HTTP API 服务")
     print()
     print("    接口列表:")
-    print(f"      POST /api/add_server              — 注册服务器")
-    print(f"      POST /api/add_device              — 注册设备")
-    print(f"      POST /api/assign_and_start_task   — 分配任务")
-    print(f"      POST /api/stop_task               — 停止任务")
-    print(f"      POST /api/submit_task_result      — 提交计算结果")
-    print(f"      POST /api/update_device_telemetry — 上报遥测数据")
-    print(f"      POST /api/heartbeat               — 心跳")
-    print(f"      GET  /api/list_servers            — 服务器列表")
-    print(f"      GET  /api/list_devices            — 设备列表")
-    print(f"      GET  /api/task_info?task_id=xxx   — 任务详情")
-    print(f"      GET  /api/device_info?device_id=x — 设备详情")
+    print(f"      POST /api/uvaTrack/CTest/add_server              — 注册服务器")
+    print(f"      POST /api/uvaTrack/CTest/add_device              — 注册设备")
+    print(f"      POST /api/uvaTrack/CTest/assign_and_start_task   — 分配任务")
+    print(f"      POST /api/uvaTrack/CTest/stop_task               — 停止任务")
+    print(f"      POST /api/uvaTrack/CTest/submit_task_result      — 提交计算结果")
+    print(f"      POST /api/uvaTrack/CTest/update_device_telemetry — 上报遥测数据")
+    print(f"      POST /api/uvaTrack/CTest/heartbeat               — 心跳")
+    print(f"      GET  /api/uvaTrack/CTest/list_servers            — 服务器列表")
+    print(f"      GET  /api/uvaTrack/CTest/list_devices            — 设备列表")
+    print(f"      GET  /api/uvaTrack/CTest/task_info?task_id=xxx   — 任务详情")
+    print(f"      GET  /api/uvaTrack/CTest/device_info?device_id=x — 设备详情")
     print("=" * 60)
     print()
 

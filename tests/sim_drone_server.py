@@ -172,7 +172,7 @@ class TelemetryReporter:
             }).encode()
             try:
                 req = urllib.request.Request(
-                    f"{self._edge_url}/api/update_device_telemetry",
+                    f"{self._edge_url}/api/uvaTrack/CTest/update_device_telemetry",
                     data=payload,
                     headers={"Content-Type": "application/json"},
                     method="POST",
@@ -261,7 +261,7 @@ def start_drone_server(
     print(f"    飞行模式:     {_drone.get_state()['flight_mode']}")
     print(f"    电池电量:     {_drone.get_state()['battery_pct']}%")
     print(f"    GPS:          fix_type={_drone.get_state()['gps_fix_type']}, 卫星={_drone.get_state()['satellites_visible']}")
-    print(f"    遥测上报:     每 {telemetry_interval}s → {edge_url}/api/update_device_telemetry")
+    print(f"    遥测上报:     每 {telemetry_interval}s → {edge_url}/api/uvaTrack/CTest/update_device_telemetry")
     print()
     print("    接口列表:")
     print(f"      POST http://127.0.0.1:{port}/api/mission    — 上传航点")

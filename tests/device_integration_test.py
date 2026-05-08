@@ -10,10 +10,10 @@ HTTP 多服务集成测试 — 模拟最真实的云边协同场景
 用户通过 curl 调用（create-task 格式）：
   curl --location --request POST 'http://work.datashell.cn:8500/ai-master-svr/create-task/' ...
 
-内部 HTTP 通信链路（用户不可见，全部走 :15000）：
-  类脑盒子  ──HTTP──→ :15000 边缘服务  (submit_task_result 上报轨迹)
-  类脑盒子  ──HTTP──→ :15002 无人设备  (下发航点 + 通知起飞)
-  无人设备  ──HTTP──→ :15000 边缘服务  (update_device_telemetry 遥测上报)
+内部 HTTP 通信链路（用户不可见，设备通过 /api/uvaTrack/CTest/ 访问）：
+  类脑盒子  ──HTTP──→ :15000/api/uvaTrack/CTest/submit_task_result
+  类脑盒子  ──HTTP──→ :15002/api/mission + /api/arm
+  无人设备  ──HTTP──→ :15000/api/uvaTrack/CTest/update_device_telemetry
 
 运行：python tests/device_integration_test.py
 """
@@ -200,7 +200,7 @@ def run_test():
     }], "注册服务器")
     print()
     print("  [内部 :15000] 执行 add_server...")
-    r = http_post(f"{EDGE_URL}/api/add_server", {
+    r = http_post(f"{EDGE_URL}/api/uvaTrack/CTest/add_server", {
         "server_id": "svr_brain_sim_01",
         "ip_address": "127.0.0.1",
         "capacity": 5,
@@ -223,7 +223,7 @@ def run_test():
     }], "注册设备")
     print()
     print("  [内部 :15000] 执行 add_device...")
-    r = http_post(f"{EDGE_URL}/api/add_device", {
+    r = http_post(f"{EDGE_URL}/api/uvaTrack/CTest/add_device", {
         "device_id": "drone_sim_01",
         "hardware_type": "sim_quadcopter",
         "is_simulated": True,
@@ -242,7 +242,7 @@ def run_test():
     }], "查看服务器")
     print()
     print("  [内部 :15000] 执行 list_servers...")
-    r = http_get(f"{EDGE_URL}/api/list_servers")
+    r = http_get(f"{EDGE_URL}/api/uvaTrack/CTest/list_servers")
     for s in r.get("data", {}).get("servers", []):
         print(f"         - {s['server_id']} | {s['ip_address']} | status={s['status']} | load={s['current_load']}/{s['capacity']}")
 
@@ -254,7 +254,7 @@ def run_test():
     }], "查看设备")
     print()
     print("  [内部 :15000] 执行 list_devices...")
-    r = http_get(f"{EDGE_URL}/api/list_devices")
+    r = http_get(f"{EDGE_URL}/api/uvaTrack/CTest/list_devices")
     for d in r.get("data", {}).get("devices", []):
         print(f"         - {d['device_id']} | hw={d['hardware_type']} | status={d['status']} | simulated={d['is_simulated']}")
 
@@ -296,7 +296,7 @@ def run_test():
     }
     print()
     print("  [内部 :15000] 执行 assign_and_start_task...")
-    r = http_post(f"{EDGE_URL}/api/assign_and_start_task", {
+    r = http_post(f"{EDGE_URL}/api/uvaTrack/CTest/assign_and_start_task", {
         "device_id": "drone_sim_01",
         "server_id": "svr_brain_sim_01",
         "task_config": task_config,
@@ -309,7 +309,7 @@ def run_test():
     print("  [内部通信] :15000 → :15001/api/task (下发任务给类脑盒子)")
     print("    全链路通信（用户不可见）：")
     print("      类脑盒子 → brain_box/Navigator.plan() 生成轨迹")
-    print("      类脑盒子 → HTTP POST :15000/api/submit_task_result  (上报轨迹)")
+    print("      类脑盒子 → HTTP POST :15000/api/uvaTrack/CTest/submit_task_result  (上报轨迹)")
     print("      类脑盒子 → HTTP POST :15002/api/mission            (下发航点)")
     print("      类脑盒子 → HTTP POST :15002/api/arm                (通知起飞)")
 
@@ -367,7 +367,7 @@ def run_test():
     }], "查询任务")
     print()
     print(f"  [内部 :15000] 执行 get_task_info...")
-    r = http_get(f"{EDGE_URL}/api/task_info?task_id={task_id}")
+    r = http_get(f"{EDGE_URL}/api/uvaTrack/CTest/task_info?task_id={task_id}")
     task_info = r.get("data", {})
     results = task_info.get("results", [])
     print(f"  [返回] 任务状态: {task_info.get('status', 'N/A')}")
@@ -387,7 +387,7 @@ def run_test():
     }], "查询设备")
     print()
     print("  [内部 :15000] 执行 get_device_info...")
-    r = http_get(f"{EDGE_URL}/api/device_info?device_id=drone_sim_01")
+    r = http_get(f"{EDGE_URL}/api/uvaTrack/CTest/device_info?device_id=drone_sim_01")
     device_info = r.get("data", {})
     print(f"  [返回] status: {device_info.get('status', 'N/A')}")
     tel = device_info.get("latest_telemetry", {})
@@ -415,7 +415,7 @@ def run_test():
     }], "提交检测结果")
     print()
     print("  [内部 :15000] 执行 submit_task_result(detection)...")
-    r = http_post(f"{EDGE_URL}/api/submit_task_result", {
+    r = http_post(f"{EDGE_URL}/api/uvaTrack/CTest/submit_task_result", {
         "task_id": task_id,
         "result_type": "detection",
         "payload": {
@@ -430,7 +430,7 @@ def run_test():
     print(f"  [返回] code={r['code']}, result_id={r.get('data', {}).get('result_id', 'N/A')}")
 
     # 验证多类型结果
-    r = http_get(f"{EDGE_URL}/api/task_info?task_id={task_id}")
+    r = http_get(f"{EDGE_URL}/api/uvaTrack/CTest/task_info?task_id={task_id}")
     result_types = [res["result_type"] for res in r.get("data", {}).get("results", [])]
     print(f"  [验证] 任务结果类型列表: {result_types}")
 
@@ -447,7 +447,7 @@ def run_test():
     }], "停止任务")
     print()
     print("  [内部 :15000] 执行 stop_task...")
-    r = http_post(f"{EDGE_URL}/api/stop_task", {
+    r = http_post(f"{EDGE_URL}/api/uvaTrack/CTest/stop_task", {
         "device_id": "drone_sim_01",
         "reason": "test_complete",
     })
@@ -455,8 +455,8 @@ def run_test():
 
     print()
     print("  [内部 :15000] 执行 remove_device + remove_server...")
-    http_post(f"{EDGE_URL}/api/remove_device", {"device_id": "drone_sim_01"})
-    http_post(f"{EDGE_URL}/api/remove_server", {"server_id": "svr_brain_sim_01", "force_stop": True})
+    http_post(f"{EDGE_URL}/api/uvaTrack/CTest/remove_device", {"device_id": "drone_sim_01"})
+    http_post(f"{EDGE_URL}/api/uvaTrack/CTest/remove_server", {"server_id": "svr_brain_sim_01", "force_stop": True})
     print("  [返回] 清理完成")
 
     # 关停服务
@@ -484,10 +484,10 @@ def run_test():
     print(f"        --data-urlencode 'capability_id={CAPABILITY_ID}' \\")
     print("        --data-urlencode 'param=[{\"dtype\":\"cloud_edge_manager\",...}]'")
     print()
-    print("    内部 HTTP 通信链路（:15000 端口，用户不可见）：")
-    print("      类脑盒子 ──HTTP──→ :15000 边缘服务  (submit_task_result)")
-    print("      类脑盒子 ──HTTP──→ :15002 无人设备  (mission + arm)")
-    print("      无人设备 ──HTTP──→ :15000 边缘服务  (update_device_telemetry)")
+    print("    内部 HTTP 通信链路（设备通过 /api/uvaTrack/CTest/ 访问，用户不可见）：")
+    print("      类脑盒子 ──HTTP──→ :15000/api/uvaTrack/CTest/submit_task_result")
+    print("      类脑盒子 ──HTTP──→ :15002/api/mission + /api/arm")
+    print("      无人设备 ──HTTP──→ :15000/api/uvaTrack/CTest/update_device_telemetry")
     print()
     print("    真机替换：")
     print("      1. 类脑盒子: 部署 brain_box/ 到真实设备，修改 --edge-url / --drone-url")

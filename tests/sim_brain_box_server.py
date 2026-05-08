@@ -82,7 +82,7 @@ def _make_http_post_bridge(edge_url: str):
     让它通过真实 HTTP POST 调用边缘服务 :15000。
     """
     def _http_post(endpoint: str, payload: Dict[str, Any]) -> bool:
-        url = f"{edge_url}/api/{endpoint}"
+        url = f"{edge_url}/api/uvaTrack/CTest/{endpoint}"
         data = json.dumps(payload, ensure_ascii=False).encode()
         try:
             req = urllib.request.Request(
@@ -311,7 +311,7 @@ def start_brain_box_server(
     print()
     print("    收到任务后自动执行 (brain_box/ 真实代码):")
     print(f"      1. Navigator.plan()           → 生成轨迹")
-    print(f"      2. EdgeServiceClient._post()  → HTTP POST {edge_url}/api/submit_task_result")
+    print(f"      2. EdgeServiceClient._post()  → HTTP POST {edge_url}/api/uvaTrack/CTest/submit_task_result")
     print(f"      3. MAVLinkAdapter              → 内部模拟飞行")
     print(f"      4. HTTP POST                  → {drone_url}/api/mission (下发航点)")
     print(f"      5. HTTP POST                  → {drone_url}/api/arm    (通知起飞)")
