@@ -1,45 +1,72 @@
 #!/usr/bin/env python3
 """
-虚拟设备集成测试
-三阶段：
-  1. 启动模拟类脑盒子 — print 关键信息
-  2. 启动模拟无人设备 — print 关键信息
-  3. 测试用户调用   — 通过 CloudEdgeManager 接口模拟用户操作
+HTTP 多服务集成测试 — 模拟最真实的云边协同场景
 
-SimBrainBox 封装 brain_box/ 完整代码栈（Navigator + MAVLinkAdapter + EdgeServiceClient），
-通过桥接让 EdgeServiceClient 直接调用 CloudEdgeManager。
+三个独立 HTTP 服务：
+  :15000  边缘控制服务  (CloudEdgeManager)
+  :15001  模拟类脑盒子  (SimBrainBox)
+  :15002  模拟无人设备  (SimDrone)
 
-真机替换时：
-  - SimBrainBox → brain_box/main.py（simulated=False）
-  - SimDrone    → MAVLink 真实飞控
-  - CloudEdgeManager 代码无需修改
+通信链路（全部走 HTTP）：
+  用户/测试 ──HTTP──→ :15000 边缘服务 (注册/分配任务/查询)
+  用户/测试 ──HTTP──→ :15001 类脑盒子 (下发任务)
+  类脑盒子  ──HTTP──→ :15000 边缘服务 (submit_task_result 上报轨迹)
+  类脑盒子  ──HTTP──→ :15002 无人设备 (下发航点 + 通知起飞)
+  无人设备  ──HTTP──→ :15000 边缘服务 (update_device_telemetry 遥测上报)
+
+运行：python tests/device_integration_test.py
 """
 import os
 import sys
 import time
 import json
 import logging
+import urllib.request
 
-# 让 CloudEdgeManager 模块可导入
-_edge_dir = os.path.join(
-    os.path.dirname(os.path.abspath(__file__)),
-    "..", "src", "features", "uvaTrack", "v0_0_0",
-)
-sys.path.insert(0, os.path.abspath(_edge_dir))
-
-# 让 tests 目录下的模拟器可导入
+# 确保能找到服务模块
 _tests_dir = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, _tests_dir)
 
-from cloud_edge_manager import CloudEdgeManager
-from sim_brain_box import SimBrainBox
-from sim_drone import SimDrone
+_edge_dir = os.path.join(
+    os.path.dirname(_tests_dir),
+    "src", "features", "uvaTrack", "v0_0_0",
+)
+sys.path.insert(0, os.path.abspath(_edge_dir))
+
+from edge_service_server import start_edge_service
+from sim_brain_box_server import start_brain_box_server
+from sim_drone_server import start_drone_server
 
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
 )
 logger = logging.getLogger("integration_test")
+
+EDGE_URL = "http://127.0.0.1:15000"
+BRAIN_URL = "http://127.0.0.1:15001"
+DRONE_URL = "http://127.0.0.1:15002"
+
+
+# ---------------------------------------------------------------------------
+#  HTTP 辅助
+# ---------------------------------------------------------------------------
+
+def http_post(url: str, data: dict) -> dict:
+    payload = json.dumps(data, ensure_ascii=False).encode()
+    req = urllib.request.Request(
+        url, data=payload,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    resp = urllib.request.urlopen(req, timeout=10)
+    return json.loads(resp.read())
+
+
+def http_get(url: str) -> dict:
+    req = urllib.request.Request(url, method="GET")
+    resp = urllib.request.urlopen(req, timeout=10)
+    return json.loads(resp.read())
 
 
 def _sep(title: str):
@@ -55,144 +82,134 @@ def _kv(key: str, value, indent: int = 4):
         print(f"{prefix}{key}:")
         for k, v in value.items():
             print(f"{prefix}    {k}: {v}")
-    elif isinstance(value, list):
-        print(f"{prefix}{key}: {value}")
     else:
         print(f"{prefix}{key}: {value}")
 
 
+# ---------------------------------------------------------------------------
+#  测试主流程
+# ---------------------------------------------------------------------------
+
 def run_test():
-    # 重置单例（测试隔离）
-    CloudEdgeManager._instance = None
-
-    brain_box_server_id = "svr_brain_sim_01"
-    drone_device_id = "drone_sim_01"
-
-    # ==================== 初始化 CloudEdgeManager ====================
-    _sep("初始化边缘控制服务 (CloudEdgeManager)")
-    manager = CloudEdgeManager(
-        heartbeat_interval=60,
-        device_timeout=600,
-        server_timeout=600,
-    )
-    print("    CloudEdgeManager 已启动")
-    print()
-
-    # 预注册基础设施
-    manager.add_server(
-        server_id=brain_box_server_id,
-        ip_address="127.0.0.1",
-        capacity=5,
-        tags=["brain_box", "navigation", "simulated"],
-        metadata={"hardware": "sim_neuromorphic"},
-    )
-    print(f"    已注册服务器: {brain_box_server_id}")
-
-    manager.add_device(
-        device_id=drone_device_id,
-        hardware_type="sim_quadcopter",
-        is_simulated=True,
-        supported_streams=["video", "telemetry"],
-        group_id="aerial",
-        metadata={"frame": "X500"},
-    )
-    print(f"    已注册设备:   {drone_device_id}")
-
     # ==================================================================
-    # 阶段 1：启动模拟类脑盒子
+    # 启动三个 HTTP 服务
     # ==================================================================
-    _sep("阶段 1：启动模拟类脑盒子 (SimBrainBox)")
+    _sep("启动三个 HTTP 服务（模拟真实部署）")
 
-    sim_brain = SimBrainBox(
-        manager=manager,
-        server_id=brain_box_server_id,
-        device_id=drone_device_id,
-    )
-    ok = sim_brain.start()
+    # 1. 启动边缘控制服务
+    edge_server, edge_manager = start_edge_service(port=15000, blocking=False)
+    time.sleep(0.3)
 
-    print()
-    print("    >>> 类脑盒子关键信息 <<<")
-    _kv("设备 ID (server_id)", sim_brain.server_id)
-    _kv("关联无人机 ID", sim_brain.device_id)
-    _kv("当前状态", sim_brain.state)
-    _kv("启动结果", "成功" if ok else "失败")
-    _kv("内部模块", {
-        "Navigator": "brain_box/navigator.py (线性插值 + 折线避障)",
-        "MAVLinkAdapter": "brain_box/mavlink_adapter.py (模拟模式)",
-        "EdgeServiceClient": "brain_box/edge_client.py (桥接到 CloudEdgeManager)",
-    })
-    _kv("数据通道", "EdgeServiceClient._post → CloudEdgeManager (本地桥接)")
-    print()
-
-    # ==================================================================
-    # 阶段 2：启动模拟无人机
-    # ==================================================================
-    _sep("阶段 2：启动模拟无人设备 (SimDrone)")
-
-    sim_drone = SimDrone(
-        device_id=drone_device_id,
-        telemetry_callback=lambda dev_id, t_type, data, meta: manager.update_device_telemetry(
-            device_id=dev_id, telemetry_type=t_type, data=data, metadata=meta,
-        ),
-        telemetry_interval_s=0.5,
+    # 2. 启动模拟无人设备（先启动，这样类脑盒子可以给它发命令）
+    drone_server, drone_reporter, drone_core = start_drone_server(
+        port=15002,
+        device_id="drone_sim_01",
+        edge_url=EDGE_URL,
         initial_position={"lat": 30.270, "lng": 120.150, "alt": 0.0},
+        telemetry_interval=1.0,
+        blocking=False,
     )
-    sim_drone.start()
+    time.sleep(0.3)
 
-    # 等待首次遥测
-    time.sleep(1.0)
+    # 3. 启动模拟类脑盒子
+    brain_server, brain_core = start_brain_box_server(
+        port=15001,
+        server_id="svr_brain_sim_01",
+        edge_url=EDGE_URL,
+        drone_url=DRONE_URL,
+        blocking=False,
+    )
+    time.sleep(0.3)
 
-    drone_state = sim_drone.get_state()
     print()
-    print("    >>> 无人设备关键信息 <<<")
-    _kv("设备 ID", sim_drone.device_id)
-    _kv("初始位置", drone_state["position"])
-    _kv("飞行模式", drone_state["flight_mode"])
-    _kv("解锁状态", "已解锁" if drone_state["armed"] else "未解锁")
-    _kv("电池电量", f"{drone_state['battery_pct']}%")
-    _kv("GPS 定位", f"fix_type={drone_state['gps_fix_type']}, 卫星={drone_state['satellites_visible']}")
-    _kv("速度", drone_state["velocity"])
-    _kv("姿态", drone_state["attitude"])
-    _kv("遥测上报", f"每 0.5 秒 → CloudEdgeManager.update_device_telemetry(drone_status)")
-
-    # 确认遥测到达 manager
-    device_info = manager.get_device_info(drone_device_id)
-    telemetry = device_info.get("latest_telemetry", {}) if device_info else {}
-    print()
-    _kv("边缘服务遥测状态", "已接收" if telemetry else "未接收")
-    if telemetry:
-        _kv("遥测类型", telemetry.get("telemetry_type", "N/A"))
+    print("    三个服务均已启动:")
+    print(f"      :15000  边缘控制服务  (CloudEdgeManager)")
+    print(f"      :15001  模拟类脑盒子  (SimBrainBox)")
+    print(f"      :15002  模拟无人设备  (SimDrone)")
     print()
 
     # ==================================================================
-    # 阶段 3：测试用户调用
+    # 阶段 1：HTTP 验证各服务可达
     # ==================================================================
-    _sep("阶段 3：测试用户调用")
+    _sep("阶段 1：验证各服务 HTTP 可达")
 
-    # --- 3.1 用户调用 list_servers ---
     print()
-    print("  [调用] list_servers(filter_by_status='all')")
-    servers = manager.list_servers(filter_by_status="all")
-    print(f"  [返回] 服务器数量: {len(servers.get('data', {}).get('servers', []))}")
-    for s in servers.get("data", {}).get("servers", []):
+    print("  [HTTP GET] → 边缘服务 :15000/api/list_servers")
+    r = http_get(f"{EDGE_URL}/api/list_servers")
+    print(f"  [返回] code={r['code']}, 服务器数量={r.get('data', {}).get('total', 0)}")
+
+    print()
+    print("  [HTTP GET] → 类脑盒子 :15001/api/status")
+    r = http_get(f"{BRAIN_URL}/api/status")
+    brain_status = r.get("data", {})
+    print(f"  [返回] server_id={brain_status.get('server_id')}, state={brain_status.get('state')}")
+    print(f"         支持算法: {brain_status.get('algorithms')}")
+    print(f"         边缘服务: {brain_status.get('edge_url')}")
+    print(f"         无人机:   {brain_status.get('drone_url')}")
+
+    print()
+    print("  [HTTP GET] → 无人设备 :15002/api/status")
+    r = http_get(f"{DRONE_URL}/api/status")
+    drone_status = r.get("data", {})
+    print(f"  [返回] device_id={drone_status.get('device_id')}")
+    _kv("位置", drone_status.get("position"))
+    _kv("电池", f"{drone_status.get('battery_pct')}%")
+    _kv("飞行模式", drone_status.get("flight_mode"))
+    _kv("GPS", f"fix_type={drone_status.get('gps_fix_type')}, 卫星={drone_status.get('satellites_visible')}")
+
+    # ==================================================================
+    # 阶段 2：通过边缘服务 HTTP 注册基础设施
+    # ==================================================================
+    _sep("阶段 2：HTTP 注册基础设施")
+
+    print()
+    print("  [HTTP POST] → :15000/api/add_server")
+    r = http_post(f"{EDGE_URL}/api/add_server", {
+        "server_id": "svr_brain_sim_01",
+        "ip_address": "127.0.0.1",
+        "capacity": 5,
+        "tags": ["brain_box", "navigation", "simulated"],
+        "metadata": {"hardware": "sim_neuromorphic"},
+    })
+    print(f"  [返回] code={r['code']}, msg={r['msg']}")
+
+    print()
+    print("  [HTTP POST] → :15000/api/add_device")
+    r = http_post(f"{EDGE_URL}/api/add_device", {
+        "device_id": "drone_sim_01",
+        "hardware_type": "sim_quadcopter",
+        "is_simulated": True,
+        "supported_streams": ["video", "telemetry"],
+        "group_id": "aerial",
+        "metadata": {"frame": "X500"},
+    })
+    print(f"  [返回] code={r['code']}, msg={r['msg']}")
+
+    # 查看注册结果
+    print()
+    print("  [HTTP GET] → :15000/api/list_servers")
+    r = http_get(f"{EDGE_URL}/api/list_servers")
+    for s in r.get("data", {}).get("servers", []):
         print(f"         - {s['server_id']} | {s['ip_address']} | status={s['status']} | load={s['current_load']}/{s['capacity']}")
 
-    # --- 3.2 用户调用 list_devices ---
     print()
-    print("  [调用] list_devices(group_id='all')")
-    devices = manager.list_devices(group_id="all")
-    print(f"  [返回] 设备数量: {len(devices.get('data', {}).get('devices', []))}")
-    for d in devices.get("data", {}).get("devices", []):
+    print("  [HTTP GET] → :15000/api/list_devices")
+    r = http_get(f"{EDGE_URL}/api/list_devices")
+    for d in r.get("data", {}).get("devices", []):
         print(f"         - {d['device_id']} | hw={d['hardware_type']} | status={d['status']} | simulated={d['is_simulated']}")
 
-    # --- 3.3 用户调用 assign_and_start_task（核心：指定设备使用服务器规划路径）---
+    # ==================================================================
+    # 阶段 3：核心调度 — 分配任务 + 全链路 HTTP 通信
+    # ==================================================================
+    _sep("阶段 3：核心调度 — 全链路 HTTP 通信")
+
+    # 3.1 通过边缘服务分配任务
     print()
-    print("  [调用] assign_and_start_task")
-    print("         device_id  = drone_sim_01")
-    print("         server_id  = svr_brain_sim_01")
-    print("         algorithm  = linear_interpolation")
-    print("         start_point= (30.270, 120.150, alt=10)")
-    print("         end_point  = (30.280, 120.160, alt=10)")
+    print("  [HTTP POST] → :15000/api/assign_and_start_task")
+    print("    device_id  = drone_sim_01")
+    print("    server_id  = svr_brain_sim_01")
+    print("    algorithm  = linear_interpolation")
+    print("    start/end  = (30.270,120.150) → (30.280,120.160)")
 
     task_config = {
         "algorithm": "linear_interpolation",
@@ -204,144 +221,165 @@ def run_test():
             "nav_params": {"speed_m_s": 5.0, "waypoint_interval_m": 200.0},
         },
     }
-
-    r = manager.assign_and_start_task(
-        device_id=drone_device_id,
-        server_id=brain_box_server_id,
-        task_config=task_config,
-    )
-    task_id = r["data"]["task"]["task_id"]
+    r = http_post(f"{EDGE_URL}/api/assign_and_start_task", {
+        "device_id": "drone_sim_01",
+        "server_id": "svr_brain_sim_01",
+        "task_config": task_config,
+    })
+    task_id = r.get("data", {}).get("task", {}).get("task_id", "")
     print(f"  [返回] code={r['code']}, task_id={task_id}")
 
-    # --- 3.4 类脑盒子收到任务并处理（BrainBox 完整代码路径）---
+    # 3.2 HTTP 调用类脑盒子处理任务
     print()
-    print("  [类脑盒子] 收到任务，开始处理...")
-    print("             → Navigator.plan() 生成轨迹")
-    print("             → EdgeServiceClient.report_trajectory() 上报边缘服务")
-    print("             → MAVLinkAdapter.upload_mission() 下发无人机")
+    print("  [HTTP POST] → :15001/api/task  (下发任务给类脑盒子)")
+    print("    全链路通信：")
+    print("      类脑盒子 → Navigator 生成轨迹")
+    print("      类脑盒子 → HTTP POST :15000/api/submit_task_result  (上报轨迹)")
+    print("      类脑盒子 → HTTP POST :15002/api/mission            (下发航点)")
+    print("      类脑盒子 → HTTP POST :15002/api/arm                (通知起飞)")
 
-    ok = sim_brain.handle_task(task_id, task_config)
-    print(f"  [类脑盒子] 处理结果: {'成功' if ok else '失败'}")
+    r = http_post(f"{BRAIN_URL}/api/task", {
+        "task_id": task_id,
+        "task_config": task_config,
+    })
+    trajectory = r.get("data", {})
+    waypoints = trajectory.get("waypoints", [])
+    print(f"  [返回] code={r['code']}")
+    print(f"         航点数量: {len(waypoints)}")
+    print(f"         总距离:   {trajectory.get('total_distance_m', 0):.1f}m")
+    print(f"         预估时间: {trajectory.get('estimated_time_s', 0):.0f}s")
+    print(f"         算法:     {trajectory.get('algorithm_used', 'N/A')}")
+    if waypoints:
+        print(f"         起点: ({waypoints[0]['lat']:.4f}, {waypoints[0]['lng']:.4f})")
+        print(f"         终点: ({waypoints[-1]['lat']:.4f}, {waypoints[-1]['lng']:.4f})")
 
-    # --- 3.5 用户调用 get_task_info 查询任务结果 ---
+    # 3.3 等待无人机飞行
     print()
-    print(f"  [调用] get_task_info(task_id='{task_id}')")
-    task_info = manager.get_task_info(task_id)
-    if task_info:
-        print(f"  [返回] 任务状态: {task_info.get('status', 'N/A')}")
-        results = task_info.get("results", [])
-        print(f"         结果数量: {len(results)}")
-        for res in results:
-            payload = res.get("payload", {})
-            wps = payload.get("waypoints", [])
-            print(f"         - result_type={res['result_type']}")
-            print(f"           航点数量: {len(wps)}")
-            print(f"           总距离: {payload.get('total_distance_m', 0):.1f}m")
-            print(f"           预估时间: {payload.get('estimated_time_s', 0):.0f}s")
-            if wps:
-                print(f"           起点: ({wps[0]['lat']:.4f}, {wps[0]['lng']:.4f}, alt={wps[0].get('alt', 'N/A')})")
-                print(f"           终点: ({wps[-1]['lat']:.4f}, {wps[-1]['lng']:.4f}, alt={wps[-1].get('alt', 'N/A')})")
+    print("  [等待] 无人机飞行中（HTTP 轮询 :15002/api/status）...")
+    time.sleep(1.0)  # 给飞行线程一点启动时间
 
-    # --- 3.6 SimDrone 接收航点并飞行 ---
+    for i in range(40):
+        r = http_get(f"{DRONE_URL}/api/status")
+        state = r.get("data", {})
+        if state.get("mission_complete", False):
+            break
+        if i % 5 == 0:
+            pos = state.get("position", {})
+            print(f"         飞行中... pos=({pos.get('lat', 0):.4f}, {pos.get('lng', 0):.4f}) "
+                  f"battery={state.get('battery_pct', 0)}% mode={state.get('flight_mode', '?')} "
+                  f"progress={state.get('mission_progress', '?')}")
+        time.sleep(0.5)
+
+    r = http_get(f"{DRONE_URL}/api/status")
+    final = r.get("data", {})
+    pos = final.get("position", {})
+    print(f"  [无人设备] 飞行完成: mission_complete={final.get('mission_complete')}")
+    print(f"             终点位置: ({pos.get('lat', 0):.4f}, {pos.get('lng', 0):.4f}, alt={pos.get('alt', 0):.1f})")
+    print(f"             电池剩余: {final.get('battery_pct', 0)}%")
+    print(f"             飞行模式: {final.get('flight_mode', '?')}")
+
+    # ==================================================================
+    # 阶段 4：通过边缘服务查询结果（验证 HTTP 回调已到达）
+    # ==================================================================
+    _sep("阶段 4：通过边缘服务 HTTP 查询结果")
+
+    # 4.1 查询任务详情（含轨迹结果）
     print()
-    print("  [无人设备] 接收航点，开始模拟飞行...")
-    if task_info and task_info.get("results"):
-        wps = task_info["results"][0].get("payload", {}).get("waypoints", [])
-        if wps:
-            sim_drone.upload_mission(wps)
-            sim_drone.arm_and_fly()
+    print(f"  [HTTP GET] → :15000/api/task_info?task_id={task_id}")
+    r = http_get(f"{EDGE_URL}/api/task_info?task_id={task_id}")
+    task_info = r.get("data", {})
+    results = task_info.get("results", [])
+    print(f"  [返回] 任务状态: {task_info.get('status', 'N/A')}")
+    print(f"         结果数量: {len(results)}")
+    for res in results:
+        payload = res.get("payload", {})
+        wps = payload.get("waypoints", [])
+        print(f"         - result_type={res['result_type']}, 航点={len(wps)}, "
+              f"距离={payload.get('total_distance_m', 0):.1f}m")
 
-            for i in range(30):
-                if sim_drone.mission_complete:
-                    break
-                if i % 4 == 0:
-                    state = sim_drone.get_state()
-                    print(f"             飞行中... pos=({state['position']['lat']:.4f}, {state['position']['lng']:.4f}) "
-                          f"battery={state['battery_pct']}% mode={state['flight_mode']}")
-                time.sleep(0.5)
-
-            final = sim_drone.get_state()
-            print(f"  [无人设备] 飞行完成: mission_complete={sim_drone.mission_complete}")
-            print(f"             终点位置: ({final['position']['lat']:.4f}, {final['position']['lng']:.4f}, alt={final['position']['alt']:.1f})")
-            print(f"             电池剩余: {final['battery_pct']}%")
-            print(f"             飞行模式: {final['flight_mode']}")
-
-    # --- 3.7 用户调用 get_device_info 查询设备信息 ---
+    # 4.2 查询设备详情（含遥测）
     print()
-    print(f"  [调用] get_device_info(device_id='{drone_device_id}')")
-    device_info = manager.get_device_info(drone_device_id)
-    if device_info:
-        print(f"  [返回] status: {device_info.get('status', 'N/A')}")
-        tel = device_info.get("latest_telemetry", {})
-        if tel:
-            data = tel.get("data", {})
-            print(f"         遥测类型: {tel.get('telemetry_type', 'N/A')}")
-            print(f"         位置: {data.get('position', 'N/A')}")
-            print(f"         电池: {data.get('battery_pct', 'N/A')}%")
+    print("  [HTTP GET] → :15000/api/device_info?device_id=drone_sim_01")
+    r = http_get(f"{EDGE_URL}/api/device_info?device_id=drone_sim_01")
+    device_info = r.get("data", {})
+    print(f"  [返回] status: {device_info.get('status', 'N/A')}")
+    tel = device_info.get("latest_telemetry", {})
+    if tel:
+        tel_data = tel.get("data", {})
+        print(f"         遥测类型: {tel.get('telemetry_type', 'N/A')}")
+        print(f"         位置: {tel_data.get('position', 'N/A')}")
+        print(f"         电池: {tel_data.get('battery_pct', 'N/A')}%")
 
-    # --- 3.8 用户提交额外类型的结果（验证通用接口灵活性）---
+    # 4.3 额外类型结果（验证通用接口灵活性）
     print()
-    print("  [调用] submit_task_result(result_type='detection')")
-    r = manager.submit_task_result(
-        task_id=task_id,
-        result_type="detection",
-        payload={
+    print("  [HTTP POST] → :15000/api/submit_task_result  (type=detection)")
+    r = http_post(f"{EDGE_URL}/api/submit_task_result", {
+        "task_id": task_id,
+        "result_type": "detection",
+        "payload": {
             "detections": [
                 {"class": "building", "confidence": 0.95, "bbox": [100, 200, 300, 400]},
                 {"class": "tree", "confidence": 0.88, "bbox": [400, 100, 500, 300]},
             ],
             "frame_id": 42,
         },
-        metadata={"source": "sim_vision", "model": "yolov8"},
-    )
+        "metadata": {"source": "sim_vision", "model": "yolov8"},
+    })
     print(f"  [返回] code={r['code']}, result_id={r.get('data', {}).get('result_id', 'N/A')}")
 
-    # 再次查询，确认多类型结果
-    task_info = manager.get_task_info(task_id)
-    if task_info:
-        result_types = [res["result_type"] for res in task_info.get("results", [])]
-        print(f"  [验证] 任务结果类型列表: {result_types}")
-
-    # --- 3.9 用户上报额外遥测（验证通用接口灵活性）---
+    # 4.4 额外遥测上报
     print()
-    print("  [调用] update_device_telemetry(telemetry_type='sensor')")
-    r = manager.update_device_telemetry(
-        device_id=drone_device_id,
-        telemetry_type="sensor",
-        data={
+    print("  [HTTP POST] → :15000/api/update_device_telemetry  (type=sensor)")
+    r = http_post(f"{EDGE_URL}/api/update_device_telemetry", {
+        "device_id": "drone_sim_01",
+        "telemetry_type": "sensor",
+        "data": {
             "temperature_c": 35.2,
             "humidity_pct": 62.0,
             "barometer_hpa": 1013.25,
         },
-        metadata={"source": "onboard_sensor"},
-    )
+        "metadata": {"source": "onboard_sensor"},
+    })
     print(f"  [返回] code={r['code']}")
 
-    # --- 3.10 用户停止任务 + 清理 ---
+    # 再次查询任务，验证多类型结果
+    r = http_get(f"{EDGE_URL}/api/task_info?task_id={task_id}")
+    result_types = [res["result_type"] for res in r.get("data", {}).get("results", [])]
+    print(f"  [验证] 任务结果类型列表: {result_types}")
+
+    # ==================================================================
+    # 阶段 5：停止任务 + 清理
+    # ==================================================================
+    _sep("阶段 5：停止任务 + 清理")
+
     print()
-    print(f"  [调用] stop_task(device_id='{drone_device_id}')")
-    r = manager.stop_task(device_id=drone_device_id, reason="test_complete")
+    print("  [HTTP POST] → :15000/api/stop_task")
+    r = http_post(f"{EDGE_URL}/api/stop_task", {
+        "device_id": "drone_sim_01",
+        "reason": "test_complete",
+    })
     print(f"  [返回] code={r['code']}")
 
-    # ==================================================================
-    # 清理
-    # ==================================================================
-    _sep("清理")
+    print()
+    print("  [HTTP POST] → :15000/api/remove_device")
+    r = http_post(f"{EDGE_URL}/api/remove_device", {"device_id": "drone_sim_01"})
+    print(f"  [返回] code={r['code']}")
 
-    sim_drone.stop()
-    print("    SimDrone 已停止")
+    print()
+    print("  [HTTP POST] → :15000/api/remove_server")
+    r = http_post(f"{EDGE_URL}/api/remove_server", {"server_id": "svr_brain_sim_01", "force_stop": True})
+    print(f"  [返回] code={r['code']}")
 
-    sim_brain.stop()
-    print("    SimBrainBox 已停止")
+    # 关停服务
+    drone_reporter.stop()
+    drone_core.stop()
+    drone_server.shutdown()
+    brain_server.shutdown()
+    edge_manager.shutdown()
+    edge_server.shutdown()
 
-    manager.remove_device(device_id=drone_device_id)
-    print(f"    已移除设备: {drone_device_id}")
-
-    manager.remove_server(server_id=brain_box_server_id, force_stop=True)
-    print(f"    已移除服务器: {brain_box_server_id}")
-
-    manager.shutdown()
-    print("    CloudEdgeManager 已关闭")
+    print()
+    print("    所有服务已关闭")
 
     # ==================================================================
     # 总结
@@ -350,10 +388,22 @@ def run_test():
     print()
     print("    全部流程执行成功！")
     print()
-    print("    真机替换说明：")
-    print("    1. 类脑盒子: BrainBox(simulated=False) → HTTP + 真实 MAVLink")
-    print("    2. 无人设备:  MAVLink 真实飞控替代 SimDrone")
-    print("    3. 边缘服务:  CloudEdgeManager 代码无需任何修改")
+    print("    HTTP 通信链路验证：")
+    print("      用户   ──HTTP──→ :15000 边缘服务   (注册/分配/查询)")
+    print("      用户   ──HTTP──→ :15001 类脑盒子   (下发任务)")
+    print("      类脑盒子 ──HTTP──→ :15000 边缘服务  (submit_task_result)")
+    print("      类脑盒子 ──HTTP──→ :15002 无人设备  (mission + arm)")
+    print("      无人设备 ──HTTP──→ :15000 边缘服务  (update_device_telemetry)")
+    print()
+    print("    真机替换：")
+    print("      1. 类脑盒子: 部署 brain_box/ 到真实设备，修改 --edge-url / --drone-url")
+    print("      2. 无人设备: MAVLink 真实飞控替代 SimDrone，修改 --edge-url")
+    print("      3. 边缘服务: CloudEdgeManager 代码无需任何修改")
+    print()
+    print("    独立启动命令：")
+    print("      python tests/edge_service_server.py --port 15000")
+    print("      python tests/sim_drone_server.py --port 15002 --edge-url http://127.0.0.1:15000")
+    print("      python tests/sim_brain_box_server.py --port 15001 --edge-url http://127.0.0.1:15000 --drone-url http://127.0.0.1:15002")
     print()
 
     return True
