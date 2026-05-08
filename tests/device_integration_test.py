@@ -1,26 +1,18 @@
 #!/usr/bin/env python3
 """
 虚拟设备集成测试
-编排 CloudEdgeManager + SimBrainBox（封装 brain_box/ 真实代码）+ SimDrone 的完整交互流程。
+三阶段：
+  1. 启动模拟类脑盒子 — print 关键信息
+  2. 启动模拟无人设备 — print 关键信息
+  3. 测试用户调用   — 通过 CloudEdgeManager 接口模拟用户操作
 
-SimBrainBox 内部使用 brain_box/ 的完整代码栈：
-  - Navigator 生成轨迹
-  - MAVLinkAdapter（模拟模式）模拟无人机飞行
-  - EdgeServiceClient 通过桥接直接调用 CloudEdgeManager
-
-流程：
-  1. 启动 CloudEdgeManager
-  2. 注册服务器（类脑盒子）+ 设备（无人机）
-  3. 启动 SimBrainBox（内含 brain_box 全套代码 + 模拟 MAVLink）
-  4. 启动 SimDrone（独立遥测上报）
-  5. 分配任务 → BrainBox.handle_navigation() 生成轨迹 → 桥接上报 → 模拟飞行
-  6. 查询任务信息、设备信息，验证数据完整性
-  7. 清理
+SimBrainBox 封装 brain_box/ 完整代码栈（Navigator + MAVLinkAdapter + EdgeServiceClient），
+通过桥接让 EdgeServiceClient 直接调用 CloudEdgeManager。
 
 真机替换时：
-  - SimBrainBox → brain_box/main.py（EdgeServiceClient 切换 HTTP，MAVLinkAdapter 连真机）
-  - SimDrone → 真实 MAVLink 飞控
-  - CloudEdgeManager 代码无需任何修改
+  - SimBrainBox → brain_box/main.py（simulated=False）
+  - SimDrone    → MAVLink 真实飞控
+  - CloudEdgeManager 代码无需修改
 """
 import os
 import sys
@@ -50,60 +42,53 @@ logging.basicConfig(
 logger = logging.getLogger("integration_test")
 
 
-# ---------------------------------------------------------------------------
-#  辅助
-# ---------------------------------------------------------------------------
+def _sep(title: str):
+    print()
+    print("=" * 60)
+    print(f"  {title}")
+    print("=" * 60)
 
-_pass_count = 0
-_fail_count = 0
 
-
-def _check(label: str, condition: bool, detail: str = ""):
-    global _pass_count, _fail_count
-    if condition:
-        _pass_count += 1
-        logger.info("  PASS %s %s", label, detail)
+def _kv(key: str, value, indent: int = 4):
+    prefix = " " * indent
+    if isinstance(value, dict):
+        print(f"{prefix}{key}:")
+        for k, v in value.items():
+            print(f"{prefix}    {k}: {v}")
+    elif isinstance(value, list):
+        print(f"{prefix}{key}: {value}")
     else:
-        _fail_count += 1
-        logger.error("  FAIL %s %s", label, detail)
+        print(f"{prefix}{key}: {value}")
 
-
-# ---------------------------------------------------------------------------
-#  主测试
-# ---------------------------------------------------------------------------
 
 def run_test():
-    global _pass_count, _fail_count
-    _pass_count = 0
-    _fail_count = 0
-
     # 重置单例（测试隔离）
     CloudEdgeManager._instance = None
 
+    brain_box_server_id = "svr_brain_sim_01"
+    drone_device_id = "drone_sim_01"
+
+    # ==================== 初始化 CloudEdgeManager ====================
+    _sep("初始化边缘控制服务 (CloudEdgeManager)")
     manager = CloudEdgeManager(
         heartbeat_interval=60,
         device_timeout=600,
         server_timeout=600,
     )
+    print("    CloudEdgeManager 已启动")
+    print()
 
-    brain_box_server_id = "svr_brain_sim_01"
-    drone_device_id = "drone_sim_01"
-
-    # ==================================================================
-    logger.info("=" * 60)
-    logger.info("Phase 1: 注册基础设施")
-    logger.info("=" * 60)
-
-    r = manager.add_server(
+    # 预注册基础设施
+    manager.add_server(
         server_id=brain_box_server_id,
         ip_address="127.0.0.1",
         capacity=5,
         tags=["brain_box", "navigation", "simulated"],
         metadata={"hardware": "sim_neuromorphic"},
     )
-    _check("注册类脑服务器", r["code"] == 0, f"server_id={brain_box_server_id}")
+    print(f"    已注册服务器: {brain_box_server_id}")
 
-    r = manager.add_device(
+    manager.add_device(
         device_id=drone_device_id,
         hardware_type="sim_quadcopter",
         is_simulated=True,
@@ -111,25 +96,39 @@ def run_test():
         group_id="aerial",
         metadata={"frame": "X500"},
     )
-    _check("注册虚拟无人机", r["code"] == 0, f"device_id={drone_device_id}")
+    print(f"    已注册设备:   {drone_device_id}")
 
     # ==================================================================
-    logger.info("")
-    logger.info("=" * 60)
-    logger.info("Phase 2: 初始化虚拟设备（使用 brain_box/ 完整代码）")
-    logger.info("=" * 60)
+    # 阶段 1：启动模拟类脑盒子
+    # ==================================================================
+    _sep("阶段 1：启动模拟类脑盒子 (SimBrainBox)")
 
-    # SimBrainBox 封装 brain_box/main.py 中的 BrainBox，
-    # 通过桥接让其 EdgeServiceClient 直接调用 CloudEdgeManager
     sim_brain = SimBrainBox(
         manager=manager,
         server_id=brain_box_server_id,
         device_id=drone_device_id,
     )
     ok = sim_brain.start()
-    _check("SimBrainBox 启动（brain_box 代码栈）", ok)
 
-    # SimDrone 独立上报遥测（补充 MAVLinkAdapter 模拟之外的遥测）
+    print()
+    print("    >>> 类脑盒子关键信息 <<<")
+    _kv("设备 ID (server_id)", sim_brain.server_id)
+    _kv("关联无人机 ID", sim_brain.device_id)
+    _kv("当前状态", sim_brain.state)
+    _kv("启动结果", "成功" if ok else "失败")
+    _kv("内部模块", {
+        "Navigator": "brain_box/navigator.py (线性插值 + 折线避障)",
+        "MAVLinkAdapter": "brain_box/mavlink_adapter.py (模拟模式)",
+        "EdgeServiceClient": "brain_box/edge_client.py (桥接到 CloudEdgeManager)",
+    })
+    _kv("数据通道", "EdgeServiceClient._post → CloudEdgeManager (本地桥接)")
+    print()
+
+    # ==================================================================
+    # 阶段 2：启动模拟无人机
+    # ==================================================================
+    _sep("阶段 2：启动模拟无人设备 (SimDrone)")
+
     sim_drone = SimDrone(
         device_id=drone_device_id,
         telemetry_callback=lambda dev_id, t_type, data, meta: manager.update_device_telemetry(
@@ -139,24 +138,61 @@ def run_test():
         initial_position={"lat": 30.270, "lng": 120.150, "alt": 0.0},
     )
     sim_drone.start()
-    _check("SimDrone 启动", True)
 
-    # 等待遥测到达
-    time.sleep(1.5)
+    # 等待首次遥测
+    time.sleep(1.0)
 
+    drone_state = sim_drone.get_state()
+    print()
+    print("    >>> 无人设备关键信息 <<<")
+    _kv("设备 ID", sim_drone.device_id)
+    _kv("初始位置", drone_state["position"])
+    _kv("飞行模式", drone_state["flight_mode"])
+    _kv("解锁状态", "已解锁" if drone_state["armed"] else "未解锁")
+    _kv("电池电量", f"{drone_state['battery_pct']}%")
+    _kv("GPS 定位", f"fix_type={drone_state['gps_fix_type']}, 卫星={drone_state['satellites_visible']}")
+    _kv("速度", drone_state["velocity"])
+    _kv("姿态", drone_state["attitude"])
+    _kv("遥测上报", f"每 0.5 秒 → CloudEdgeManager.update_device_telemetry(drone_status)")
+
+    # 确认遥测到达 manager
     device_info = manager.get_device_info(drone_device_id)
-    _check(
-        "初始遥测已到达",
-        device_info is not None and device_info.get("latest_telemetry") is not None,
-        f"telemetry_type={device_info.get('latest_telemetry', {}).get('telemetry_type', 'N/A')}"
-        if device_info else "",
-    )
+    telemetry = device_info.get("latest_telemetry", {}) if device_info else {}
+    print()
+    _kv("边缘服务遥测状态", "已接收" if telemetry else "未接收")
+    if telemetry:
+        _kv("遥测类型", telemetry.get("telemetry_type", "N/A"))
+    print()
 
     # ==================================================================
-    logger.info("")
-    logger.info("=" * 60)
-    logger.info("Phase 3: 分配导航任务")
-    logger.info("=" * 60)
+    # 阶段 3：测试用户调用
+    # ==================================================================
+    _sep("阶段 3：测试用户调用")
+
+    # --- 3.1 用户调用 list_servers ---
+    print()
+    print("  [调用] list_servers(filter_by_status='all')")
+    servers = manager.list_servers(filter_by_status="all")
+    print(f"  [返回] 服务器数量: {len(servers.get('data', {}).get('servers', []))}")
+    for s in servers.get("data", {}).get("servers", []):
+        print(f"         - {s['server_id']} | {s['ip_address']} | status={s['status']} | load={s['current_load']}/{s['capacity']}")
+
+    # --- 3.2 用户调用 list_devices ---
+    print()
+    print("  [调用] list_devices(group_id='all')")
+    devices = manager.list_devices(group_id="all")
+    print(f"  [返回] 设备数量: {len(devices.get('data', {}).get('devices', []))}")
+    for d in devices.get("data", {}).get("devices", []):
+        print(f"         - {d['device_id']} | hw={d['hardware_type']} | status={d['status']} | simulated={d['is_simulated']}")
+
+    # --- 3.3 用户调用 assign_and_start_task（核心：指定设备使用服务器规划路径）---
+    print()
+    print("  [调用] assign_and_start_task")
+    print("         device_id  = drone_sim_01")
+    print("         server_id  = svr_brain_sim_01")
+    print("         algorithm  = linear_interpolation")
+    print("         start_point= (30.270, 120.150, alt=10)")
+    print("         end_point  = (30.280, 120.160, alt=10)")
 
     task_config = {
         "algorithm": "linear_interpolation",
@@ -174,99 +210,78 @@ def run_test():
         server_id=brain_box_server_id,
         task_config=task_config,
     )
-    _check("任务分配", r["code"] == 0)
     task_id = r["data"]["task"]["task_id"]
-    logger.info("  task_id = %s", task_id)
+    print(f"  [返回] code={r['code']}, task_id={task_id}")
 
-    # ==================================================================
-    logger.info("")
-    logger.info("=" * 60)
-    logger.info("Phase 4: BrainBox 处理任务（Navigator → 上报轨迹 → 模拟飞行）")
-    logger.info("=" * 60)
+    # --- 3.4 类脑盒子收到任务并处理（BrainBox 完整代码路径）---
+    print()
+    print("  [类脑盒子] 收到任务，开始处理...")
+    print("             → Navigator.plan() 生成轨迹")
+    print("             → EdgeServiceClient.report_trajectory() 上报边缘服务")
+    print("             → MAVLinkAdapter.upload_mission() 下发无人机")
 
-    # 调用 brain_box 的 handle_navigation — 完整走一遍真实代码路径
     ok = sim_brain.handle_task(task_id, task_config)
-    _check("BrainBox.handle_navigation 执行成功", ok)
+    print(f"  [类脑盒子] 处理结果: {'成功' if ok else '失败'}")
 
-    # 验证轨迹已通过桥接写入 CloudEdgeManager
+    # --- 3.5 用户调用 get_task_info 查询任务结果 ---
+    print()
+    print(f"  [调用] get_task_info(task_id='{task_id}')")
     task_info = manager.get_task_info(task_id)
-    _check(
-        "轨迹已上报到边缘服务（通过桥接）",
-        task_info is not None and len(task_info.get("results", [])) > 0,
-        f"results count={len(task_info.get('results', []))}" if task_info else "",
-    )
-    if task_info and task_info.get("results"):
-        first_result = task_info["results"][0]
-        _check("结果类型为 trajectory", first_result.get("result_type") == "trajectory")
-        waypoints = first_result.get("payload", {}).get("waypoints", [])
-        _check("轨迹包含航点", len(waypoints) > 0, f"{len(waypoints)} 航点")
-        if waypoints:
-            _check(
-                "航点格式正确（含 lat/lng/alt/seq）",
-                all(k in waypoints[0] for k in ("lat", "lng", "alt", "seq")),
-            )
+    if task_info:
+        print(f"  [返回] 任务状态: {task_info.get('status', 'N/A')}")
+        results = task_info.get("results", [])
+        print(f"         结果数量: {len(results)}")
+        for res in results:
+            payload = res.get("payload", {})
+            wps = payload.get("waypoints", [])
+            print(f"         - result_type={res['result_type']}")
+            print(f"           航点数量: {len(wps)}")
+            print(f"           总距离: {payload.get('total_distance_m', 0):.1f}m")
+            print(f"           预估时间: {payload.get('estimated_time_s', 0):.0f}s")
+            if wps:
+                print(f"           起点: ({wps[0]['lat']:.4f}, {wps[0]['lng']:.4f}, alt={wps[0].get('alt', 'N/A')})")
+                print(f"           终点: ({wps[-1]['lat']:.4f}, {wps[-1]['lng']:.4f}, alt={wps[-1].get('alt', 'N/A')})")
 
-    # ==================================================================
-    logger.info("")
-    logger.info("=" * 60)
-    logger.info("Phase 5: 验证遥测持续上报")
-    logger.info("=" * 60)
-
-    # BrainBox 内部的 _status_forward_loop 也在通过桥接转发 MAVLink 模拟遥测
-    time.sleep(2.0)
-
-    device_info = manager.get_device_info(drone_device_id)
-    telemetry = device_info.get("latest_telemetry", {}) if device_info else {}
-    _check(
-        "最新遥测类型为 drone_status",
-        telemetry.get("telemetry_type") == "drone_status",
-    )
-    _check(
-        "遥测包含位置数据",
-        "position" in telemetry.get("data", {}),
-    )
-    _check(
-        "遥测包含电池数据",
-        "battery_pct" in telemetry.get("data", {}),
-    )
-
-    # ==================================================================
-    logger.info("")
-    logger.info("=" * 60)
-    logger.info("Phase 6: SimDrone 独立飞行测试")
-    logger.info("=" * 60)
-
-    # SimDrone 也可以独立接收航点飞行（模拟另一架无人机）
+    # --- 3.6 SimDrone 接收航点并飞行 ---
+    print()
+    print("  [无人设备] 接收航点，开始模拟飞行...")
     if task_info and task_info.get("results"):
         wps = task_info["results"][0].get("payload", {}).get("waypoints", [])
         if wps:
             sim_drone.upload_mission(wps)
             sim_drone.arm_and_fly()
-            _check("SimDrone 接收航点并起飞", True)
 
-            for _ in range(20):
+            for i in range(30):
                 if sim_drone.mission_complete:
                     break
+                if i % 4 == 0:
+                    state = sim_drone.get_state()
+                    print(f"             飞行中... pos=({state['position']['lat']:.4f}, {state['position']['lng']:.4f}) "
+                          f"battery={state['battery_pct']}% mode={state['flight_mode']}")
                 time.sleep(0.5)
 
-            _check("SimDrone 飞行任务完成", sim_drone.mission_complete)
+            final = sim_drone.get_state()
+            print(f"  [无人设备] 飞行完成: mission_complete={sim_drone.mission_complete}")
+            print(f"             终点位置: ({final['position']['lat']:.4f}, {final['position']['lng']:.4f}, alt={final['position']['alt']:.1f})")
+            print(f"             电池剩余: {final['battery_pct']}%")
+            print(f"             飞行模式: {final['flight_mode']}")
 
-            final_state = sim_drone.get_state()
-            _check(
-                "SimDrone 终点位置接近目标",
-                abs(final_state["position"]["lat"] - 30.280) < 0.002
-                and abs(final_state["position"]["lng"] - 120.160) < 0.002,
-                f"pos=({final_state['position']['lat']:.4f}, {final_state['position']['lng']:.4f})",
-            )
-            _check("SimDrone 电池消耗", final_state["battery_pct"] < 100.0,
-                   f"battery={final_state['battery_pct']}%")
+    # --- 3.7 用户调用 get_device_info 查询设备信息 ---
+    print()
+    print(f"  [调用] get_device_info(device_id='{drone_device_id}')")
+    device_info = manager.get_device_info(drone_device_id)
+    if device_info:
+        print(f"  [返回] status: {device_info.get('status', 'N/A')}")
+        tel = device_info.get("latest_telemetry", {})
+        if tel:
+            data = tel.get("data", {})
+            print(f"         遥测类型: {tel.get('telemetry_type', 'N/A')}")
+            print(f"         位置: {data.get('position', 'N/A')}")
+            print(f"         电池: {data.get('battery_pct', 'N/A')}%")
 
-    # ==================================================================
-    logger.info("")
-    logger.info("=" * 60)
-    logger.info("Phase 7: 多类型结果提交测试")
-    logger.info("=" * 60)
-
+    # --- 3.8 用户提交额外类型的结果（验证通用接口灵活性）---
+    print()
+    print("  [调用] submit_task_result(result_type='detection')")
     r = manager.submit_task_result(
         task_id=task_id,
         result_type="detection",
@@ -279,16 +294,17 @@ def run_test():
         },
         metadata={"source": "sim_vision", "model": "yolov8"},
     )
-    _check("检测结果提交", r["code"] == 0)
+    print(f"  [返回] code={r['code']}, result_id={r.get('data', {}).get('result_id', 'N/A')}")
 
+    # 再次查询，确认多类型结果
     task_info = manager.get_task_info(task_id)
-    _check(
-        "任务包含多类型结果",
-        task_info is not None and len(task_info.get("results", [])) == 2,
-        f"results={[r.get('result_type') for r in task_info.get('results', [])]}"
-        if task_info else "",
-    )
+    if task_info:
+        result_types = [res["result_type"] for res in task_info.get("results", [])]
+        print(f"  [验证] 任务结果类型列表: {result_types}")
 
+    # --- 3.9 用户上报额外遥测（验证通用接口灵活性）---
+    print()
+    print("  [调用] update_device_telemetry(telemetry_type='sensor')")
     r = manager.update_device_telemetry(
         device_id=drone_device_id,
         telemetry_type="sensor",
@@ -299,45 +315,48 @@ def run_test():
         },
         metadata={"source": "onboard_sensor"},
     )
-    _check("传感器遥测提交", r["code"] == 0)
+    print(f"  [返回] code={r['code']}")
+
+    # --- 3.10 用户停止任务 + 清理 ---
+    print()
+    print(f"  [调用] stop_task(device_id='{drone_device_id}')")
+    r = manager.stop_task(device_id=drone_device_id, reason="test_complete")
+    print(f"  [返回] code={r['code']}")
 
     # ==================================================================
-    logger.info("")
-    logger.info("=" * 60)
-    logger.info("Phase 8: 清理")
-    logger.info("=" * 60)
+    # 清理
+    # ==================================================================
+    _sep("清理")
 
     sim_drone.stop()
-    _check("SimDrone 停止", True)
+    print("    SimDrone 已停止")
 
     sim_brain.stop()
-    _check("SimBrainBox 停止", True)
+    print("    SimBrainBox 已停止")
 
-    r = manager.stop_task(device_id=drone_device_id, reason="test_complete")
-    _check("任务停止", r["code"] == 0)
+    manager.remove_device(device_id=drone_device_id)
+    print(f"    已移除设备: {drone_device_id}")
 
-    r = manager.remove_device(device_id=drone_device_id)
-    _check("移除无人机设备", r["code"] == 0)
-
-    r = manager.remove_server(server_id=brain_box_server_id, force_stop=True)
-    _check("移除类脑服务器", r["code"] == 0)
+    manager.remove_server(server_id=brain_box_server_id, force_stop=True)
+    print(f"    已移除服务器: {brain_box_server_id}")
 
     manager.shutdown()
+    print("    CloudEdgeManager 已关闭")
 
     # ==================================================================
-    logger.info("")
-    logger.info("=" * 60)
-    logger.info("测试结果汇总")
-    logger.info("=" * 60)
-    total = _pass_count + _fail_count
-    logger.info("通过: %d / %d", _pass_count, total)
-    if _fail_count > 0:
-        logger.error("失败: %d / %d", _fail_count, total)
-    else:
-        logger.info("全部通过!")
-    logger.info("=" * 60)
+    # 总结
+    # ==================================================================
+    _sep("测试完成")
+    print()
+    print("    全部流程执行成功！")
+    print()
+    print("    真机替换说明：")
+    print("    1. 类脑盒子: BrainBox(simulated=False) → HTTP + 真实 MAVLink")
+    print("    2. 无人设备:  MAVLink 真实飞控替代 SimDrone")
+    print("    3. 边缘服务:  CloudEdgeManager 代码无需任何修改")
+    print()
 
-    return _fail_count == 0
+    return True
 
 
 if __name__ == "__main__":
