@@ -3,6 +3,8 @@
 ## 概述
 
 本目录提供虚拟设备实现，用于在没有真实硬件的情况下端到端测试 CloudEdgeManager 的完整数据流。
+**SimBrainBox 直接封装 `brain_box/` 中的完整代码栈**（Navigator + MAVLinkAdapter + EdgeServiceClient），
+通过桥接机制让 EdgeServiceClient 的调用直达本地 CloudEdgeManager 实例。
 
 ```
 ┌─────────────────────────────────────────────────────────┐
@@ -11,23 +13,25 @@
 │                                                          │
 │  submit_task_result(task_id, result_type, payload)        │
 │  update_device_telemetry(device_id, telemetry_type, data)│
-└──────────┬────────────────────────────┬──────────────────┘
-           │                            │
-    ┌──────▼──────┐            ┌────────▼────────┐
-    │ SimBrainBox │            │    SimDrone      │
-    │ (虚拟类脑)   │──航点──→   │  (虚拟无人机)    │
-    │             │            │                  │
-    │ 接收任务     │            │ 模拟飞行          │
-    │ 生成轨迹     │            │ GPS/速度/姿态     │
-    │ 上报结果     │            │ 电池/遥测上报     │
-    └─────────────┘            └──────────────────┘
+└──────────┬───────────────────────────┬───────────────────┘
+           │ 桥接                       │ 直接调用
+    ┌──────▼──────────────┐    ┌────────▼────────┐
+    │    SimBrainBox       │    │    SimDrone      │
+    │  (封装 brain_box/)   │    │  (虚拟无人机)    │
+    │                      │    │                  │
+    │  BrainBox            │    │ 模拟飞行          │
+    │   ├─ Navigator       │    │ GPS/速度/姿态     │
+    │   ├─ MAVLinkAdapter  │──→ │ 电池/遥测上报     │
+    │   └─ EdgeServiceClient│   │                  │
+    │      (桥接到Manager) │    └──────────────────┘
+    └──────────────────────┘
 ```
 
 ## 文件说明
 
 | 文件 | 说明 |
 |---|---|
-| `sim_brain_box.py` | 虚拟类脑盒子：接收任务配置 → 生成轨迹 → 通过 `submit_task_result` 上报 |
+| `sim_brain_box.py` | 封装 `brain_box/main.py` 中的 BrainBox，桥接 EdgeServiceClient → CloudEdgeManager |
 | `sim_drone.py` | 虚拟无人机：模拟飞行 → 通过 `update_device_telemetry` 上报遥测 |
 | `device_integration_test.py` | 集成测试：编排 CloudEdgeManager + SimBrainBox + SimDrone 完整流程 |
 | `simulation_test.sh` | curl 自动化测试脚本（直接调用边缘服务 API） |
@@ -40,72 +44,59 @@ cd tests
 python device_integration_test.py
 ```
 
-测试覆盖 8 个阶段、20+ 个检查点：注册 → 遥测 → 任务分配 → 轨迹生成 → 飞行模拟 → 多类型数据 → 清理。
+测试覆盖 8 个阶段：注册 → 设备初始化 → 任务分配 → BrainBox 处理（轨迹生成+上报+模拟飞行） → 遥测验证 → SimDrone 飞行 → 多类型数据 → 清理。
+
+## 桥接机制说明
+
+SimBrainBox 通过 monkey-patch `EdgeServiceClient._post` 方法，将 HTTP 调用桥接为本地函数调用：
+
+| EdgeServiceClient 调用 | 桥接到 CloudEdgeManager |
+|---|---|
+| `_post("heartbeat", ...)` | `refresh_server_heartbeat()` / `refresh_device_heartbeat()` |
+| `_post("submit_task_result", ...)` | `submit_task_result(task_id, result_type, payload, metadata)` |
+| `_post("update_device_telemetry", ...)` | `update_device_telemetry(device_id, telemetry_type, data, metadata)` |
+
+**桥接的数据格式与 HTTP 调用完全一致**，因此切换真机时无需修改任何数据结构。
 
 ## 真机替换指南
 
-### 设计原则
-
-虚拟设备与真实设备使用 **完全相同的数据格式**，通过 CloudEdgeManager 的 2 个通用接口通信：
-
-- `submit_task_result(task_id, result_type, payload, metadata)` — 提交计算结果
-- `update_device_telemetry(device_id, telemetry_type, data, metadata)` — 上报遥测数据
-
-替换时 **无需修改边缘控制服务的任何代码**，只需切换设备端的通信方式。
-
 ### 替换类脑盒子 (SimBrainBox → 真机 brain_box/)
 
-| 虚拟 | 真机 | 说明 |
-|---|---|---|
-| `SimBrainBox.on_task_assigned()` | `brain_box/main.py → BrainBox.handle_navigation()` | 任务处理入口 |
-| `result_callback()` 直接调用 manager | `brain_box/edge_client.py → EdgeServiceClient.submit_task_result()` | HTTP POST |
-| `waypoint_callback()` 直接传列表 | `brain_box/mavlink_adapter.py → MAVLinkAdapter.upload_mission()` | MAVLink 协议 |
-| 内置 `_linear_interpolation` | `brain_box/navigator.py → Navigator.plan()` | 可插拔算法 |
+SimBrainBox 内部就是 `brain_box/main.py` 的 `BrainBox` 类，替换只需两步：
 
-**步骤：**
-1. 在类脑盒子上部署 `brain_box/` 目录
-2. 配置环境变量：
+1. **EdgeServiceClient 切换 HTTP 模式**：
+   ```python
+   # brain_box/main.py 中
+   self._edge_client = EdgeServiceClient(
+       config=self._config.edge_service,
+       simulated=False,  # ← 改为 False，启用真实 HTTP
+   )
+   ```
+   配置环境变量：
    ```bash
    export EDGE_SERVICE_URL=http://<edge_server_ip>:8080
    export BRAIN_BOX_DEVICE_ID=brain_box_01
    export BRAIN_BOX_SERVER_ID=svr_brain_01
    ```
-3. 启动：`python brain_box/main.py`
-4. 在边缘服务注册：`add_server(server_id="svr_brain_01", ...)`
 
-### 替换无人机 (SimDrone → 真机 MAVLink)
-
-| 虚拟 | 真机 | 说明 |
-|---|---|---|
-| `SimDrone._flight_loop()` | 真实飞控 (ArduPilot/PX4) | 自主飞行 |
-| `SimDrone._telemetry_loop()` | `brain_box/mavlink_adapter.py → _read_real_telemetry()` | MAVLink 消息解析 |
-| `telemetry_callback()` 直接调用 manager | `brain_box/edge_client.py → forward_drone_status()` | HTTP POST |
-| `SimDrone.upload_mission()` | `MAVLinkAdapter.upload_mission()` | MAVLink mission_item_int |
-
-**步骤：**
-1. 类脑盒子上配置 MAVLink 连接：
+2. **MAVLinkAdapter 连接真实飞控**：
+   ```python
+   # brain_box/main.py 中
+   self._mavlink = MAVLinkAdapter(
+       config=self._config.mavlink,
+       on_state_update=self._on_drone_state_update,
+       simulated=False,  # ← 改为 False，连接真实 MAVLink
+   )
+   ```
+   配置环境变量：
    ```bash
    export MAVLINK_CONN=udp:127.0.0.1:14550   # 或 /dev/ttyACM0
    ```
-2. `brain_box/main.py` 将 `simulated=False` 传入 `MAVLinkAdapter`
-3. 遥测数据格式不变，边缘服务自动接收
 
-### 数据格式对齐
+### 替换无人机 (SimDrone → 真机 MAVLink)
 
-轨迹结果（`result_type="trajectory"`）：
-```json
-{
-    "waypoints": [
-        {"lat": 30.270, "lng": 120.150, "alt": 10.0, "seq": 0, "speed_m_s": 5.0},
-        {"lat": 30.275, "lng": 120.155, "alt": 10.0, "seq": 1, "speed_m_s": 5.0}
-    ],
-    "total_distance_m": 640.25,
-    "estimated_time_s": 128.05,
-    "algorithm_used": "linear_interpolation"
-}
-```
+SimDrone 的遥测数据格式与 `brain_box/mavlink_adapter.py` 的 `_read_real_telemetry()` 输出一致：
 
-无人机遥测（`telemetry_type="drone_status"`）：
 ```json
 {
     "position": {"lat": 30.271, "lng": 120.151, "alt": 10.2},
@@ -119,4 +110,4 @@ python device_integration_test.py
 }
 ```
 
-只要真机输出的数据遵循以上格式，即可无缝替换。
+只要真机输出遵循以上格式，即可无缝替换。
