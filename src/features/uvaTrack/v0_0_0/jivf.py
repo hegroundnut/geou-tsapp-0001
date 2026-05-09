@@ -13,7 +13,7 @@ CloudEdgeManager 工具入口 — CTest 类
   stop_task           中断指定设备与服务器之间的任务和数据流
 
 扩展接口:
-  heartbeat           设备/服务器心跳上报
+  heartbeat           设备/服务器心跳上报（支持自动识别和添加）
   get_device_info     获取设备详细信息（含流通道、遥测）
   get_task_info       查询任务详情（含计算结果）
   update_location     设备位置上报
@@ -86,11 +86,21 @@ stop_task:
     "reason": "user_manual_stop"
 }
 
-heartbeat:
+heartbeat (设备自动注册示例):
 {
     "target_type": "device",
     "target_id": "robot_dog_nx_01",
-    "location": {"lat": 30.27, "lng": 120.15, "alt": 5.0}
+    "location": {"lat": 30.27, "lng": 120.15, "alt": 5.0},
+    "metadata": {
+        "hardware_type": "jetson_xavier_nx",
+        "supported_streams": ["video", "lidar_point_cloud"]
+    }
+}
+
+heartbeat (服务器):
+{
+    "target_type": "server",
+    "target_id": "svr_node_01"
 }
 
 get_device_info:
@@ -152,9 +162,11 @@ _current_dir = os.path.dirname(os.path.abspath(__file__))
 if _current_dir not in sys.path:
     sys.path.insert(0, _current_dir)
 
-from cloud_edge_manager import CloudEdgeManager
+from core.manager import CloudEdgeManager
+from config.settings import settings
+from utils.logger import setup_logging
 
-logger = logging.getLogger("uvaTrack")
+logger = setup_logging("uvaTrack")
 
 
 class CTest:
@@ -171,11 +183,39 @@ class CTest:
         self.proc_modules_obj = proc_modules_obj
         self.progress_callback = progress_callback
 
+        # 从配置中读取参数
         heartbeat_cfg = node_cfg.get("heartbeat_config", {})
+        storage_cfg = node_cfg.get("storage_config", {})
+        
+        # 配置存储路径
+        if storage_cfg:
+            settings.set_storage_paths(
+                tasks_dir=storage_cfg.get("tasks_dir"),
+                results_dir=storage_cfg.get("results_dir"),
+                telemetry_dir=storage_cfg.get("telemetry_dir"),
+                logs_dir=storage_cfg.get("logs_dir"),
+            )
+        
+        # 配置心跳参数
+        settings.set_heartbeat_config(
+            check_interval_s=heartbeat_cfg.get("check_interval_s"),
+            device_timeout_s=heartbeat_cfg.get("device_timeout_s"),
+            server_timeout_s=heartbeat_cfg.get("server_timeout_s"),
+        )
+        
+        # 配置自动注册
+        auto_register_cfg = node_cfg.get("auto_register_config", {})
+        if auto_register_cfg:
+            settings.set_auto_register(
+                enabled=auto_register_cfg.get("enabled", True),
+                timeout_s=auto_register_cfg.get("timeout_s", 60.0),
+            )
+        
+        # 初始化管理器
         self._manager = CloudEdgeManager(
-            heartbeat_interval=heartbeat_cfg.get("check_interval_s", 5.0),
-            device_timeout=heartbeat_cfg.get("device_timeout_s", 15.0),
-            server_timeout=heartbeat_cfg.get("server_timeout_s", 30.0),
+            heartbeat_interval=settings.heartbeat_check_interval_s,
+            device_timeout=settings.device_timeout_s,
+            server_timeout=settings.server_timeout_s,
             on_task_stopped=self._on_task_stopped_callback,
         )
 
@@ -195,6 +235,8 @@ class CTest:
     # ------------------------------------------------------------------
 
     def _handle_result(self, func_name, result):
+        print(func_name)
+        print(result)
         if result.get("code", -1) == 0:
             self.progress_callback(
                 100,
@@ -309,7 +351,12 @@ class CTest:
     # ==================================================================
 
     def heartbeat(self, params):
-        """设备/服务器心跳上报"""
+        """
+        设备/服务器心跳上报
+        
+        支持自动识别和添加陌生设备/服务器。
+        心跳消息中的 metadata 字段应包含必要的注册信息。
+        """
         target_type = params.get("target_type", "device")
         target_id = params.get("target_id", "")
         location = params.get("location")
@@ -317,7 +364,11 @@ class CTest:
         self.progress_callback(10, f"心跳上报: {target_type}/{target_id}")
 
         if target_type == "device":
-            ok = self._manager.refresh_device_heartbeat(target_id, location=location)
+            ok = self._manager.refresh_device_heartbeat(
+                target_id,
+                location=location,
+                heartbeat_data=params,  # 传递完整心跳数据用于自动注册
+            )
         elif target_type == "server":
             ok = self._manager.refresh_server_heartbeat(target_id)
         else:
@@ -326,7 +377,7 @@ class CTest:
 
         result = {
             "code": 0 if ok else -1,
-            "msg": "success" if ok else f"{target_type} {target_id} 不存在",
+            "msg": "success" if ok else f"{target_type} {target_id} 不存在或已被移除",
             "data": {"target_type": target_type, "target_id": target_id},
         }
         return self._handle_result("heartbeat", result)
