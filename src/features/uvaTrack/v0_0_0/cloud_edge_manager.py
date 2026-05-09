@@ -20,6 +20,8 @@ from models import (
     TaskRecord,
     TaskStatus,
     ChannelType,
+    TaskResult,
+    DeviceTelemetry,
 )
 from stream_registry import StreamRegistry
 from heartbeat import HeartbeatMonitor
@@ -59,6 +61,9 @@ class CloudEdgeManager:
         self._devices: Dict[str, EdgeDevice] = {}
         self._tasks: Dict[str, TaskRecord] = {}       # task_id -> TaskRecord
         self._device_tasks: Dict[str, str] = {}        # device_id -> task_id
+
+        self._task_results: Dict[str, List[TaskResult]] = {}   # task_id -> [TaskResult, ...]
+        self._device_telemetry: Dict[str, DeviceTelemetry] = {}  # device_id -> latest DeviceTelemetry
 
         self._stream_registry = StreamRegistry()
         self._heartbeat = HeartbeatMonitor(
@@ -520,15 +525,96 @@ class CloudEdgeManager:
             if device.active_task_id:
                 task = self._tasks.get(device.active_task_id)
                 info["active_task"] = task.to_dict() if task else None
+            telemetry = self._device_telemetry.get(device_id)
+            info["latest_telemetry"] = telemetry.to_dict() if telemetry else None
             return info
 
     def get_task_info(self, task_id: str) -> Optional[Dict[str, Any]]:
         with self._lock:
             task = self._tasks.get(task_id)
-            return task.to_dict() if task else None
+            if not task:
+                return None
+            info = task.to_dict()
+            results = self._task_results.get(task_id, [])
+            info["results"] = [r.to_dict() for r in results]
+            return info
 
     def get_stream_channels(self, device_id: str) -> List[Dict[str, Any]]:
         return self._stream_registry.get_channels_by_device(device_id)
+
+    # ==================================================================
+    #  通用数据交互（设备无关 — 任何服务器/设备均可使用）
+    # ==================================================================
+
+    def submit_task_result(
+        self,
+        task_id: str,
+        result_type: str,
+        payload: Optional[Dict[str, Any]] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        with self._lock:
+            task = self._tasks.get(task_id)
+            if not task:
+                return {"code": -1, "msg": f"任务 {task_id} 不存在", "data": {}}
+
+            result = TaskResult(
+                result_id=TaskResult.generate_result_id(),
+                task_id=task_id,
+                device_id=task.device_id,
+                server_id=task.server_id,
+                result_type=result_type,
+                payload=dict(payload) if payload else {},
+                metadata=dict(metadata) if metadata else {},
+            )
+            self._task_results.setdefault(task_id, []).append(result)
+            logger.info(
+                "Task result submitted: %s type=%s task=%s",
+                result.result_id,
+                result_type,
+                task_id,
+            )
+            return {
+                "code": 0,
+                "msg": "success",
+                "data": result.to_dict(),
+            }
+
+    def update_device_telemetry(
+        self,
+        device_id: str,
+        telemetry_type: str,
+        data: Optional[Dict[str, Any]] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        with self._lock:
+            device = self._devices.get(device_id)
+            if not device:
+                return {"code": -1, "msg": f"设备 {device_id} 不存在", "data": {}}
+
+            telemetry = DeviceTelemetry(
+                device_id=device_id,
+                telemetry_type=telemetry_type,
+                data=dict(data) if data else {},
+                metadata=dict(metadata) if metadata else {},
+            )
+            self._device_telemetry[device_id] = telemetry
+
+            position = (data or {}).get("position")
+            if position and isinstance(position, dict):
+                device.location = dict(position)
+            device.last_active_time = time.time()
+
+            logger.info(
+                "Telemetry updated: device=%s type=%s",
+                device_id,
+                telemetry_type,
+            )
+            return {
+                "code": 0,
+                "msg": "success",
+                "data": telemetry.to_dict(),
+            }
 
     def shutdown(self) -> None:
         self._heartbeat.stop()

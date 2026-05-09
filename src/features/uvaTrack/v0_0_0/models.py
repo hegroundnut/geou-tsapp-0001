@@ -177,3 +177,67 @@ class StreamChannel:
     @staticmethod
     def generate_channel_id() -> str:
         return f"ch_{uuid.uuid4().hex[:10]}"
+
+
+# ---------------------------------------------------------------------------
+#  任务结果（通用 — 服务器向边缘服务提交的计算结果）
+# ---------------------------------------------------------------------------
+
+@dataclass
+class TaskResult:
+    """
+    通用任务结果。
+    服务器完成计算后提交，result_type 标识结果类型（如 trajectory、analysis 等），
+    payload 为具体数据（格式由调用方自定义，边缘服务不解析内部结构）。
+    """
+    result_id: str
+    task_id: str
+    device_id: str
+    server_id: str
+    result_type: str = ""           # e.g. "trajectory", "detection", "analysis"
+    payload: Dict[str, Any] = field(default_factory=dict)
+    created_at: float = field(default_factory=time.time)
+    metadata: Dict[str, Any] = field(default_factory=dict)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "result_id": self.result_id,
+            "task_id": self.task_id,
+            "device_id": self.device_id,
+            "server_id": self.server_id,
+            "result_type": self.result_type,
+            "payload": dict(self.payload),
+            "created_at": self.created_at,
+            "metadata": dict(self.metadata),
+        }
+
+    @staticmethod
+    def generate_result_id() -> str:
+        return f"res_{uuid.uuid4().hex[:12]}"
+
+
+# ---------------------------------------------------------------------------
+#  设备遥测（通用 — 设备/服务器向边缘服务上报的遥测数据）
+# ---------------------------------------------------------------------------
+
+@dataclass
+class DeviceTelemetry:
+    """
+    通用设备遥测。
+    telemetry_type 标识遥测类型（如 position、drone_status、sensor 等），
+    data 为具体遥测数据（格式由上报方自定义，边缘服务只存储和转发）。
+    """
+    device_id: str
+    telemetry_type: str = ""        # e.g. "position", "drone_status", "sensor", "lidar"
+    data: Dict[str, Any] = field(default_factory=dict)
+    timestamp: float = field(default_factory=time.time)
+    metadata: Dict[str, Any] = field(default_factory=dict)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "device_id": self.device_id,
+            "telemetry_type": self.telemetry_type,
+            "data": dict(self.data),
+            "timestamp": self.timestamp,
+            "metadata": dict(self.metadata),
+        }
